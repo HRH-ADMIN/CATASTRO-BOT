@@ -597,3 +597,99 @@ N-03 resuelve:
    el olvido. El flujo se reanuda cuando se restaura el canal.
 
 ---
+
+## O-08 — Medición de costo Anthropic + panel /config/costos
+
+**Sprint:** 4
+**Fecha de implementación:** 2026-05-22
+**Branch:** `sprint-4/o-08-anthropic-costs`
+
+### Por qué este cambio existe
+
+Antes no había forma de saber cuánto cuesta cada plano procesado por Vision.
+Si Anthropic API se sale del control de costos, el operador se entera
+cuando llega la factura. O-08 captura cada llamada con tokens consumidos
+y costo USD calculado en tiempo real, expone agregaciones en
+`/config/costos`, y alerta a 80% del budget mensual configurado.
+
+### Procedimiento
+
+1. **Forzar una llamada manual** (sin esperar a procesar un plano):
+   ```powershell
+   .venv\Scripts\python.exe -c "
+   from src.utils.api_costs import record_call
+   from pathlib import Path
+   record_call(Path('data/catastro.db'),
+               model='claude-3-5-sonnet-20241022',
+               tipo='vision_plano', expediente_id='SEG-2026-005',
+               input_tokens=15000, output_tokens=2500)
+   "
+   ```
+
+2. **Verificar la captura via curl:**
+   ```powershell
+   curl http://localhost:9224/api/costs/summary
+   ```
+   Debe mostrar `current_month_spend_usd` > 0, agregación mensual,
+   top expedientes y budget actual.
+
+3. **Abrir el panel:** `http://localhost:9224/config/costos`
+   - Card grande con gasto del mes vs budget + barra de progreso.
+   - Chart de barras con consumo de los últimos 31 días.
+   - Tablas: resumen mensual por modelo, top expedientes, últimas 50 llamadas.
+
+4. **Configurar budget mensual** desde la UI o vía API:
+   ```powershell
+   curl -X POST http://localhost:9224/api/costs/budget `
+     -H "Content-Type: application/json" `
+     -d "{\"monthly_usd\":100,\"alert_threshold\":0.90}"
+   ```
+
+5. **Forzar alerta de budget** (testing):
+   ```powershell
+   .venv\Scripts\python.exe -c "
+   from src.utils.api_costs import set_budget, record_call, check_budget_alert
+   from pathlib import Path
+   db = Path('data/catastro.db')
+   set_budget(db, monthly_usd=1.0, alert_threshold=0.50)
+   record_call(db, model='claude-3-5-sonnet-20241022',
+               tipo='test_alert', input_tokens=300_000, output_tokens=0)
+   print('Alert:', check_budget_alert(db))
+   "
+   ```
+   - El job `api-budget-alert` corre cada 6h y dispara la notificación.
+   - Si Green API está caído (N-03), la alerta llega por email automático.
+
+### Criterios de aceptación
+
+- [x] Cada llamada Anthropic queda persistida en `api_costs` con tokens
+      desglosados (input, output, cache_read, cache_write) + costo USD.
+- [x] Tarifas embebidas para Sonnet/Opus/Haiku 3.x y 4.x.
+- [x] Panel `/config/costos` con gasto, barra de %, chart diario, tablas.
+      Actualización via SSE al recibir `api_cost_recorded`.
+- [x] Budget configurable via UI (presupuesto + threshold).
+- [x] Alerta a 80% del budget vía `WhatsAppAgent.enviar_mensaje`
+      (con fallback email N-03 si Green API down).
+- [x] Alerta idempotente por mes (no spam).
+- [x] Tests: **31 nuevos** (23 api_costs + 8 API/panel).
+
+### Tests automatizados relacionados
+
+| Archivo | Tests | Cubre |
+|---|---|---|
+| `test_api_costs.py` | 23 | Schema, calc costo, record + SSE, track wrapper, reads, budget |
+| `test_costos_api.py` | 8 | Endpoints /api/costs/* + página /config/costos |
+
+### Limitaciones conocidas
+
+1. **`minuta_agent` no propaga `expediente_id`** al `record_call` — la
+   llamada queda registrada con `expediente_id=NULL`. Mejora futura:
+   pasar el contexto desde el workflow.
+2. **Las tarifas son estáticas en código.** Si Anthropic cambia precios,
+   actualizar `_PRICING_USD_PER_MTOK` en `api_costs.py`.
+3. **No cuenta requests fallidos**. Si la llamada lanza excepción antes
+   de retornar `.usage`, no se registra (correcto — no hubo cobro).
+4. **`thinking` tokens en Claude 4 no se desglosan separadamente** —
+   quedan dentro de `output_tokens`.
+
+---

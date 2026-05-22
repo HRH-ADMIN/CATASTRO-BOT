@@ -391,6 +391,22 @@ class MinutaAgent(BaseAgent):
             getattr(usage, "cache_creation_input_tokens", 0),
             usage.output_tokens,
         )
+        # O-08: persistir costo USD (best-effort, no rompe el flujo)
+        try:
+            from config.settings import DATABASE_PATH
+            from src.utils.api_costs import record_call
+            record_call(
+                DATABASE_PATH,
+                model=self._model, tipo="minuta_analisis",
+                expediente_id=None,  # caller no pasa el id acá; mejorable
+                input_tokens=usage.input_tokens or 0,
+                output_tokens=usage.output_tokens or 0,
+                cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+                cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            )
+        except Exception:
+            self._log.exception("api_costs: record_call falló (no es crítico)")
+
         return response.parsed_output
 
     # ---------- BaseAgent ----------

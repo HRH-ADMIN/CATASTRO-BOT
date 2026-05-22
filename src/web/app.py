@@ -207,6 +207,59 @@ def create_app() -> Flask:
         )
         return jsonify(new_state.to_dict())
 
+    # ──────────── API costs Anthropic (Sprint 4 / O-08) ────────────────
+
+    @app.route("/api/costs/summary", methods=["GET"])
+    def api_costs_summary():
+        from config.settings import DATABASE_PATH
+        from src.utils import api_costs as _ac
+        return jsonify({
+            "monthly":       _ac.read_monthly_summary(DATABASE_PATH),
+            "daily":         _ac.read_daily_summary(DATABASE_PATH),
+            "by_expediente": _ac.read_by_expediente(DATABASE_PATH, limit=20),
+            "budget":        _ac.read_budget(DATABASE_PATH),
+            "current_month_spend_usd":
+                round(_ac.current_month_spend(DATABASE_PATH), 4),
+        })
+
+    @app.route("/api/costs/recent", methods=["GET"])
+    def api_costs_recent():
+        from config.settings import DATABASE_PATH
+        from src.utils import api_costs as _ac
+        try:
+            limit = max(1, min(int(request.args.get("limit", 50)), 500))
+        except (TypeError, ValueError):
+            limit = 50
+        return jsonify({"calls": _ac.read_recent_calls(DATABASE_PATH, limit=limit)})
+
+    @app.route("/api/costs/budget", methods=["POST"])
+    def api_costs_set_budget():
+        denied = _require_auth_for_mutations()
+        if denied:
+            return jsonify(denied[0]), denied[1]
+        from config.settings import DATABASE_PATH
+        from src.utils import api_costs as _ac
+        data = request.get_json(silent=True) or {}
+        try:
+            monthly_usd = float(data.get("monthly_usd", 50.0))
+            alert_threshold = float(data.get("alert_threshold", 0.80))
+            result = _ac.set_budget(
+                DATABASE_PATH,
+                monthly_usd=monthly_usd,
+                alert_threshold=alert_threshold,
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify(result)
+
+    @app.route("/config/costos", methods=["GET"])
+    def costos_panel_page():
+        from src.utils.dashboard_costos_html import render_costos_panel_html
+        return render_costos_panel_html(), 200, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+        }
+
     # ──────────── External services health (Sprint 4 / N-03) ───────────
 
     @app.route("/api/external-services", methods=["GET"])
