@@ -16,6 +16,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+# Mínimo soportado por las dependencias actuales. El entorno productivo
+# corre 3.13.13 (2026-05-22). Subir este mínimo cuando se haga una pasada
+# de modernización con `uv` (ver PLAN_MEJORAS Sprint 3 / O-10).
 REQUIRED_PYTHON = (3, 11)
 
 
