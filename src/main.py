@@ -196,6 +196,59 @@ class BotRuntime:
             replace_existing=True,
         )
 
+        # ── U-02: Tracking de procesos vivos ──────────────────────────
+        # Registra este proceso (scheduler) en runtime_processes y
+        # programa heartbeat cada 10s + monitor que detecta procesos
+        # colgados/muertos cada 30s.
+        from config.settings import DATABASE_PATH, LOGS_DIR
+        from src.utils import runtime_processes as _rp
+        self._rp_log_path = str(LOGS_DIR / "scheduler.log")
+        try:
+            _rp.register_process(
+                DATABASE_PATH,
+                process_name="scheduler",
+                log_file_path=self._rp_log_path,
+            )
+        except Exception:
+            self.log.exception("runtime_processes: register falló — sigo")
+
+        def _scheduler_heartbeat():
+            try:
+                _rp.heartbeat(DATABASE_PATH, process_name="scheduler")
+            except Exception:
+                self.log.exception("runtime_processes: heartbeat falló")
+
+        self._scheduler.add_job(
+            _scheduler_heartbeat,
+            trigger="interval",
+            seconds=10,
+            id="runtime-heartbeat-scheduler",
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+
+        def _process_monitor():
+            try:
+                counts = _rp.run_monitor_pass(DATABASE_PATH)
+                if counts["hanging"] or counts["dead"]:
+                    self.log.warning(
+                        "process-monitor: alive=%d hanging=%d dead=%d",
+                        counts["alive"], counts["hanging"], counts["dead"],
+                    )
+            except Exception:
+                self.log.exception("process-monitor falló")
+
+        self._scheduler.add_job(
+            _process_monitor,
+            trigger="interval",
+            seconds=30,
+            id="process-monitor",
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+
         self._install_signal_handlers()
 
         self._scheduler.start()
@@ -294,6 +347,14 @@ class BotRuntime:
                 self._file_manager.stop()
             except Exception:
                 self.log.exception("error apagando file_manager")
+        # U-02: marcar el proceso scheduler como dead graceful
+        try:
+            from config.settings import DATABASE_PATH
+            from src.utils import runtime_processes as _rp
+            _rp.mark_stopped(DATABASE_PATH, process_name="scheduler",
+                             reason="graceful")
+        except Exception:
+            self.log.exception("runtime_processes: mark_stopped falló")
         self.log.info("catastro-bot DETENIDO")
 
 

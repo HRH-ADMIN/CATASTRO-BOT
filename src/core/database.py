@@ -158,6 +158,36 @@ BEGIN
     SELECT RAISE(FAIL, 'audit_log entries are immutable');
 END;
 
+-- ── Procesos vivos del sistema (U-02 paso A) ─────────────────────────────────
+-- Cada componente del bot (scheduler, dashboard, watchdog, chrome_bot)
+-- inserta una fila al arrancar y emite heartbeat cada 10s. El job
+-- `process-monitor` detecta procesos colgados (sin heartbeat > 2 min) o
+-- muertos (PID ya no existe en SO).
+--
+-- A diferencia de `module_state` (U-03), que captura la INTENCIÓN del
+-- operador, esta tabla captura la REALIDAD del SO. Las dos pueden
+-- divergir (módulo en RUNNING + proceso dead = el bot debe alertar).
+--
+-- Plan: PLAN_MEJORAS Sprint 1 / U-02 paso A.
+CREATE TABLE IF NOT EXISTS runtime_processes (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    process_name        TEXT NOT NULL,        -- 'scheduler', 'dashboard', 'watchdog', 'chrome_bot'
+    pid                 INTEGER NOT NULL,
+    started_at          TEXT NOT NULL,
+    last_heartbeat_at   TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'alive',  -- 'alive', 'dead', 'hanging'
+    cpu_percent         REAL,
+    memory_mb           REAL,
+    log_file_path       TEXT,
+    stopped_at          TEXT,                 -- ISO cuando se detectó parada/colgada
+    stop_reason         TEXT,                 -- 'graceful' | 'dead_pid' | 'hanging'
+    CHECK (status IN ('alive','dead','hanging'))
+);
+CREATE INDEX IF NOT EXISTS idx_runtime_processes_status ON runtime_processes(status);
+CREATE INDEX IF NOT EXISTS idx_runtime_processes_name   ON runtime_processes(process_name);
+CREATE INDEX IF NOT EXISTS idx_runtime_processes_alive  ON runtime_processes(process_name, status)
+    WHERE status = 'alive';
+
 -- ── Máquina de estados de control runtime (U-03 paso 2) ───────────────────────
 -- Reemplaza el booleano simple de `data/control.json` con estados explícitos:
 --   STOPPED → STARTING → RUNNING → STOPPING → STOPPED
