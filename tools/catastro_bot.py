@@ -202,6 +202,29 @@ def _cmd_health(extra_args: list[str]) -> int:
     return 0 if salud["status"] != "error" else 1
 
 
+def _cmd_install_shortcut(extra_args: list[str]) -> int:
+    """Instala (idempotentemente) un shortcut al dashboard en el Escritorio.
+
+    Delega en tools/install_desktop_shortcut.ps1. Re-ejecutar es seguro:
+    sobreescribe sin error. El icono customizado en assets/icon.ico se usa
+    automáticamente si existe.
+
+    Plan: PLAN_MEJORAS Sprint 1 / U-01.
+    """
+    import subprocess
+    ps_script = ROOT / "tools" / "install_desktop_shortcut.ps1"
+    if not ps_script.exists():
+        print(f"[ERROR] {ps_script} no existe")
+        return 1
+    cmd = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", str(ps_script),
+    ] + extra_args
+    return subprocess.call(cmd)
+
+
 def _cmd_enviar_digest(extra_args: list[str]) -> int:
     """Dispara el digest semanal por email."""
     from src.core.credential_manager import CredentialManager
@@ -253,6 +276,7 @@ SUBCOMANDOS: dict[str, tuple] = {
     "debug":         (_cmd_debug,         "Inspección del bot (bp6/bp7/ddl/estado/chrome)"),
     "health":        (_cmd_health,        "Estado del sistema (JSON)"),
     "enviar-digest": (_cmd_enviar_digest, "Enviar digest semanal por email"),
+    "install-shortcut": (_cmd_install_shortcut, "Crear shortcut del dashboard en el Escritorio"),
 }
 
 

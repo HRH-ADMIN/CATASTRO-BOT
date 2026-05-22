@@ -33,6 +33,14 @@ WHATSAPP_CONFIRMATION_TIMEOUT = 60 * 60 * 24
 # Audit log
 AUDIT_HASH_ALGO = "sha256"
 
+# ── Servidor web del dashboard (localhost-only) ────────────────────────────
+# Centralizado acá para que el shortcut de escritorio (tools/install_desktop_shortcut.ps1)
+# y otros consumidores no hardcodeen el puerto.
+# Plan: PLAN_MEJORAS Sprint 1 / U-01.
+DASHBOARD_PORT = 9224
+DASHBOARD_URL = f"http://localhost:{DASHBOARD_PORT}/"
+HEALTHCHECK_PORT = 9223
+
 # Ley 6545 — Ley de Catastro Nacional de Costa Rica
 LEY_CATASTRO = "6545"
 MUNICIPALIDAD_DEFAULT = "San Ramón"
