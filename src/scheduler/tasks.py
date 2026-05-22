@@ -55,15 +55,61 @@ def _gated(
     manager: "Optional[ControlStateManager]",
     job_id: str,
 ) -> Callable:
-    """Wrappea `func` para que solo corra si `module` está enabled en control_state.
+    """Wrappea `func` para que solo corra si `module` está enabled.
 
-    Si `manager` es None (modo legacy / `windows_service.py`), retorna `func`
-    sin cambios — backwards compatible.
+    Lectura dual durante la migración U-03 paso 2.4:
+      1. ControlStateMachine (nuevo, SSOT): si el módulo está en RUNNING,
+         pasa. En cualquier otro estado (STOPPED/STARTING/STOPPING/ERROR),
+         skip. Si el módulo es desconocido para la máquina (legacy
+         backwards-compat), cae al check del manager legacy.
+      2. ControlStateManager legacy (`control_state.py`): se mantiene
+         como espejo para no romper código existente que escribe sólo
+         ahí. Eventualmente se deprecará en favor de la state machine.
+
+    Si `manager` es None (modo legacy / windows_service.py): se ignora la
+    capa legacy pero la state machine sigue activa.
+
+    Plan: PLAN_MEJORAS Sprint 1 / U-03 paso 2.4.
     """
-    if manager is None:
-        return func
 
     def gated(*args, **kwargs):
+        # ── Capa 1: ControlStateMachine (nuevo SSOT) ─────────────────
+        try:
+            from src.core.state_machine import (
+                get_state_machine, KNOWN_MODULES as SM_KNOWN,
+            )
+            sm = get_state_machine()
+            # 'scheduler' es el master; si está STOPPED o ERROR, gate todo
+            # incluso si el módulo específico está RUNNING (semánticamente
+            # equivalente al `enabled=False` del manager legacy).
+            if "scheduler" in SM_KNOWN:
+                sched_state = sm.read("scheduler")
+                if sched_state.state in ("STOPPED", "ERROR"):
+                    _log.debug(
+                        "%s: skipped — scheduler master en estado %s",
+                        job_id, sched_state.state,
+                    )
+                    return None
+            if module in SM_KNOWN:
+                mod_state = sm.read(module)
+                if mod_state.state != "RUNNING":
+                    _log.debug(
+                        "%s: skipped — módulo %s en estado %s (no RUNNING)",
+                        job_id, module, mod_state.state,
+                    )
+                    return None
+                # Estado RUNNING → permitir pasar (sin consultar legacy).
+                return func(*args, **kwargs)
+            # Módulo no conocido por la state machine → cae al legacy.
+        except Exception:
+            _log.exception(
+                "%s: error leyendo state machine — cayendo a legacy",
+                job_id,
+            )
+
+        # ── Capa 2: ControlStateManager legacy (espejo de compat) ───
+        if manager is None:
+            return func(*args, **kwargs)
         try:
             state = manager.read()
         except Exception:
