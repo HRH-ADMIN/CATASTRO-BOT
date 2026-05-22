@@ -1,14 +1,19 @@
 """Registro de jobs de APScheduler — catastro-bot Semana 9.
 
-Jobs registrados:
-  orchestrator-tick        cada 60s    procesa WhatsApp + avanza workflows
-  audit-verify             diario 03h  verifica la cadena de hashes del audit log
-  stale-alert              cada 6h     detecta expedientes bloqueados > 48h y alerta
-  weekly-report            lunes 07h   resumen semanal de expedientes al admin
-  db-backup                diario 02h  copia de seguridad de la BD a directorio local
-  apt-sync-estados         cada 30 min consulta APT vía CDP
-  muni-sync-emails         cada 15 min polling IMAP municipalidad
-  correcciones-renotif     cada 24 h   recordatorios de planos sin corregir
+Jobs registrados (9 jobs + 1 one-shot al arrancar):
+  orchestrator-tick           cada 60s     procesa WhatsApp + avanza workflows
+  audit-verify                diario 03h   verifica la cadena de hashes del audit log
+  stale-alert                 cada 6h      detecta expedientes bloqueados > 48h y alerta
+  weekly-report               lunes 07h CR resumen semanal de expedientes al admin
+  db-backup                   diario 02h   copia de seguridad (+ Drive si activo)
+  apt-sync-estados            cada 30 min  consulta APT vía CDP
+  muni-sync-emails-arranque   one-shot     IMAP poll 30s después del boot
+  muni-sync-emails            cron 11:00+14:00 CR L-V  IMAP poll (3 veces al día)
+  correcciones-renotif        cada 24 h    recordatorios de planos sin corregir
+
+Nota histórica: muni-sync-emails corría cada 15 min hasta el 2026-05-20.
+Se cambió a cron 2 veces/día L-V (regla `muni_polling_3_veces_al_dia_no_cada_15min`
+en `apt_memoria_operador`) porque los trámites muni demoran días, no minutos.
 
 Gating runtime (cuando se pasa `control_manager`):
   Los jobs que tocan sistemas externos consultan `control_state` antes de
