@@ -207,6 +207,35 @@ def create_app() -> Flask:
         )
         return jsonify(new_state.to_dict())
 
+    # ──────────── External services health (Sprint 4 / N-03) ───────────
+
+    @app.route("/api/external-services", methods=["GET"])
+    def api_external_services():
+        """Snapshot del estado de servicios externos (Green API, Anthropic,
+        Drive, RNP). El dashboard lo usa para mostrar el banner amarillo
+        de Green API caído."""
+        from config.settings import DATABASE_PATH
+        from src.utils import external_services as _es
+        return jsonify({"services": _es.read_all(DATABASE_PATH)})
+
+    @app.route("/api/external-services/<service>/mark-up", methods=["POST"])
+    def api_external_service_mark_up(service: str):
+        """Force-restaura un servicio (botón manual en el dashboard cuando
+        el operador re-autoriza Green API y quiere acelerar el recovery).
+        """
+        denied = _require_auth_for_mutations()
+        if denied:
+            return jsonify(denied[0]), denied[1]
+        from config.settings import DATABASE_PATH
+        from src.utils import external_services as _es
+        if service not in _es.KNOWN_SERVICES:
+            return jsonify({"error": "servicio desconocido",
+                            "known": list(_es.KNOWN_SERVICES)}), 400
+        data = request.get_json(silent=True) or {}
+        reason = (data.get("reason") or "manual mark-up via dashboard")[:200]
+        result = _es.mark_up(DATABASE_PATH, service, reason=reason)
+        return jsonify(result)
+
     # ─────────────────── Runtime processes (U-02 paso B) ────────────────
     # Capa SO: qué procesos están vivos.
 

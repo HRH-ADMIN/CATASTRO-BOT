@@ -362,6 +362,51 @@ def _horas_desde(iso_ts: str) -> int:
         return -1
 
 
+# ── Auto-recovery de Green API (Sprint 4 / N-03 sub-paso C) ────────────────────
+
+def _greenapi_recovery(orchestrator: "Orchestrator") -> None:
+    """Intenta restaurar Green API si está marcado como down.
+
+    Cada 30 min consulta el estado de la instancia (getStateInstance). Si
+    responde OK, marca el servicio como 'up' (la próxima llamada a
+    `enviar_mensaje` volverá a usar WhatsApp en lugar del fallback email).
+
+    Si el servicio NO está down, no hace nada (no genera tráfico extra).
+    """
+    from config.settings import DATABASE_PATH
+    from src.utils.external_services import is_down, mark_up
+    if not is_down(DATABASE_PATH, "green_api"):
+        return  # nada que recuperar
+
+    try:
+        # Llama directamente getStateInstance — bypass de los wrappers
+        # que sabe el agente para no spammear el audit. Usamos requests
+        # crudos con timeout corto.
+        agent = orchestrator.whatsapp
+        instance, token = agent._api()
+        base = agent._base
+        url = f"{base}/waInstance{instance}/getStateInstance/{token}"
+        import requests as _r
+        r = _r.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            estado = data.get("stateInstance") or data.get("state")
+            if estado == "authorized":
+                mark_up(DATABASE_PATH, "green_api",
+                        reason=f"getStateInstance={estado}")
+                _log.info("greenapi-recovery: instancia restaurada (%s)", estado)
+            else:
+                _log.debug("greenapi-recovery: instancia aún en %s", estado)
+        elif r.status_code == 466:
+            # Sigue desautorizada — no hacer nada
+            _log.debug("greenapi-recovery: sigue HTTP 466")
+        else:
+            _log.debug("greenapi-recovery: estado HTTP %d", r.status_code)
+    except Exception as exc:
+        # Best-effort — no spammear logs
+        _log.debug("greenapi-recovery: error checkeando — %s", exc)
+
+
 # ── registro de jobs ───────────────────────────────────────────────────────────
 
 def _sync_muni_emails(orchestrator: "Orchestrator") -> None:
@@ -716,11 +761,26 @@ def register_jobs(
         replace_existing=True,
     )
 
+    # ── Auto-recovery Green API (N-03) — cada 30 min — gate "whatsapp" ──
+    # Solo intenta recuperar si el servicio está marcado como down.
+    # NO emite tráfico extra cuando está up (corta temprano en _greenapi_recovery).
+    scheduler.add_job(
+        _gated(_greenapi_recovery, module="whatsapp",
+               manager=control_manager, job_id="greenapi-recovery"),
+        trigger="interval",
+        minutes=30,
+        args=[orchestrator],
+        id="greenapi-recovery",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+
     gate_mode = "with gate" if control_manager else "no gate (legacy)"
     _log.info(
-        "scheduler: 9 jobs registrados (%s) "
+        "scheduler: 10 jobs registrados (%s) "
         "(tick, audit-verify, db-backup, stale-alert, weekly-report, "
         "correcciones-renotif, apt-sync-estados, muni-sync-emails-arranque, "
-        "muni-sync-emails [11:00+14:00 CR L-V])",
+        "muni-sync-emails [11:00+14:00 CR L-V], greenapi-recovery)",
         gate_mode,
     )

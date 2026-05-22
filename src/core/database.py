@@ -158,6 +158,28 @@ BEGIN
     SELECT RAISE(FAIL, 'audit_log entries are immutable');
 END;
 
+-- ── Salud de servicios externos (Sprint 4 / N-03) ────────────────────────────
+-- Estado persistente de servicios externos (Green API, Anthropic, Drive, etc.).
+-- A diferencia de module_state (intención del operador) y runtime_processes
+-- (realidad del SO), esta tabla captura la SALUD DE TERCEROS.
+--
+-- Si Green API devuelve HTTP 466 (instancia desautorizada o quota excedida)
+-- el bot marca el servicio como 'down' acá. El job auto-recovery cada 30 min
+-- intenta restaurar; si recibe OK, marca 'up' de nuevo.
+--
+-- Plan: PLAN_MEJORAS Sprint 4 / N-03.
+CREATE TABLE IF NOT EXISTS external_services_health (
+    service_name        TEXT PRIMARY KEY,        -- 'green_api', 'anthropic', 'drive', ...
+    status              TEXT NOT NULL DEFAULT 'up',  -- 'up' | 'down' | 'degraded'
+    last_check_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    last_down_at        TEXT,                    -- cuándo se detectó down por última vez
+    last_up_at          TEXT,                    -- cuándo se restauró por última vez
+    last_error_code     TEXT,                    -- ej. '466', 'TIMEOUT', '500'
+    last_error_message  TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    CHECK (status IN ('up','down','degraded'))
+);
+
 -- ── Procesos vivos del sistema (U-02 paso A) ─────────────────────────────────
 -- Cada componente del bot (scheduler, dashboard, watchdog, chrome_bot)
 -- inserta una fila al arrancar y emite heartbeat cada 10s. El job

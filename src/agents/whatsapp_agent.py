@@ -128,8 +128,54 @@ class WhatsAppAgent(BaseAgent):
     def _post(self, method: str, body: dict) -> dict:
         GREEN_API_LIMITER.acquire()
         r = requests.post(self._url(method), json=body, timeout=self._timeout)
+        # N-03: capturar HTTP 466 (Green API: instancia desautorizada o quota
+        # excedida) ANTES de raise_for_status. raise_for_status sigue
+        # haciéndose para todos los demás 4xx/5xx.
+        if r.status_code == 466:
+            self._mark_greenapi_down(
+                error_code="466",
+                error_message=(r.text or "")[:500],
+            )
+            from src.core.exceptions import AgentError
+            raise AgentError(
+                "Green API HTTP 466 — instancia desautorizada o quota "
+                "excedida. El bot marcó el servicio como down."
+            )
         r.raise_for_status()
         return r.json()
+
+    def _mark_greenapi_down(self, *, error_code: str, error_message: str) -> None:
+        """Marca Green API como 'down' en external_services_health + audit log."""
+        from config.settings import DATABASE_PATH
+        from src.utils.external_services import mark_down as _mark_down
+        try:
+            _mark_down(
+                DATABASE_PATH,
+                "green_api",
+                error_code=error_code,
+                error_message=error_message,
+            )
+        except Exception:
+            self._log.exception("no se pudo marcar green_api down")
+        # Audit log
+        try:
+            with self.db._transaction() as conn:
+                self.db._audit(
+                    conn, actor="system", expediente_id=None,
+                    accion="greenapi.down",
+                    detalles={"code": error_code, "msg": error_message[:200]},
+                )
+        except Exception:
+            self._log.exception("no se pudo escribir audit log de greenapi.down")
+
+    def _is_greenapi_down(self) -> bool:
+        """Check rápido: ¿está Green API marcado como down?"""
+        from config.settings import DATABASE_PATH
+        from src.utils.external_services import is_down as _is_down
+        try:
+            return _is_down(DATABASE_PATH, "green_api")
+        except Exception:
+            return False
 
     @_GREEN_RETRY
     def _get(self, method: str) -> Any:
@@ -154,11 +200,61 @@ class WhatsAppAgent(BaseAgent):
 
     # ---------- enviar ----------
 
-    def enviar_mensaje(self, telefono: str, mensaje: str) -> str:
-        """Envía un mensaje de texto. Devuelve el `idMessage` de Green API."""
+    def enviar_mensaje(self, telefono: str, mensaje: str,
+                       *, contexto: str = "general") -> str:
+        """Envía un mensaje de texto. Devuelve el `idMessage` de Green API.
+
+        Si Green API está marcado como 'down' por una detección previa de
+        HTTP 466 (N-03), envía el mensaje por EMAIL al operador en lugar
+        de WhatsApp. Devuelve un id sintético 'email:<hash>' para que el
+        caller pueda persistirlo si necesita.
+
+        Plan: PLAN_MEJORAS Sprint 4 / N-03.
+        """
+        # Short-circuit si el bot ya sabe que Green API está caído
+        if self._is_greenapi_down():
+            return self._fallback_via_email(telefono, mensaje, contexto)
+
         body = {"chatId": self._chat_id(telefono), "message": mensaje}
-        resp = self._post("sendMessage", body)
+        try:
+            resp = self._post("sendMessage", body)
+        except Exception as exc:
+            # Si _post detectó 466, ya marcó como down; intentamos fallback.
+            if self._is_greenapi_down():
+                self._log.warning(
+                    "Green API falló (%s) — usando fallback email",
+                    type(exc).__name__,
+                )
+                return self._fallback_via_email(telefono, mensaje, contexto)
+            raise
         return str(resp.get("idMessage", ""))
+
+    def _fallback_via_email(self, telefono: str, mensaje: str,
+                            contexto: str) -> str:
+        """Envía el mensaje al operador por email. Devuelve id sintético."""
+        from src.utils.whatsapp_email_fallback import send_via_email_fallback
+        import hashlib
+        ok = send_via_email_fallback(
+            self.credentials,
+            telefono=telefono, mensaje=mensaje, contexto=contexto,
+        )
+        # ID sintético para trazar
+        h = hashlib.sha256(
+            f"{telefono}|{contexto}|{mensaje[:50]}".encode("utf-8")
+        ).hexdigest()[:12]
+        synthetic_id = f"email:{h}" if ok else f"email-failed:{h}"
+        # Audit
+        try:
+            with self.db._transaction() as conn:
+                self.db._audit(
+                    conn, actor="system", expediente_id=None,
+                    accion="whatsapp.fallback_email",
+                    detalles={"telefono": telefono[-4:], "contexto": contexto,
+                              "ok": ok, "id": synthetic_id},
+                )
+        except Exception:
+            self._log.exception("audit fallback_email falló")
+        return synthetic_id
 
     def notificar_estado(self, telefono: str, mensaje: str) -> str:
         """Mensaje informativo (sin acción asociada)."""
