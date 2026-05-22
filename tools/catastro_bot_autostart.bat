@@ -1,7 +1,18 @@
 @echo off
 REM ─────────────────────────────────────────────────────────────────────
-REM  Catastro Bot — Autostart al iniciar sesión Windows
-REM  Lo lanza Windows desde la carpeta Startup del usuario.
+REM  Catastro Bot — Autostart al iniciar sesión Windows (LEGACY)
+REM
+REM  ⚠️  DEPRECATED (2026-05-22, U-02 paso C):
+REM      Usá `catastro_bot_autostart.vbs` en su lugar — sin ventanas CMD,
+REM      sin conflicto de doble dashboard (este .bat arranca
+REM      dashboard_web standalone Y src.main, ambos intentan bind a 9224).
+REM
+REM      Este .bat sigue funcional para DEBUGGING (ver consolas), pero
+REM      el flujo recomendado de producción es:
+REM         cscript //nologo tools\catastro_bot_autostart.vbs
+REM
+REM  ─────────────────────────────────────────────────────────────────────
+REM  Lo que arranca:
 REM
 REM  Lo que arranca:
 REM    1. Chrome del bot (CDP 9222) con perfil dedicado

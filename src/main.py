@@ -33,10 +33,44 @@ except ImportError:
     pass
 
 import argparse
+import io
 import signal
 import sys
 import threading
+from datetime import datetime, timezone
 from typing import Optional
+
+
+def _redirect_stdio_if_pythonw() -> None:
+    """Bajo `pythonw.exe` (sin consola), sys.stdout/stderr son `None` y
+    cualquier `print()` o traceback no manejado se PIERDE silenciosamente.
+    Redirigimos a `logs/scheduler.stdout.log` y `logs/scheduler.stderr.log`
+    para que el operador pueda ver pánicos via /config/runtime.
+
+    No interfiere con el logging.RotatingFileHandler — son canales distintos.
+
+    Plan: PLAN_MEJORAS Sprint 1 / U-02 paso C.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return  # estamos bajo python.exe con consola, no hace falta
+    try:
+        from config.settings import LOGS_DIR
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        # Apertura en modo append, line-buffered, encoding utf-8
+        sys.stdout = open(LOGS_DIR / "scheduler.stdout.log",
+                          "a", encoding="utf-8", buffering=1)
+        sys.stderr = open(LOGS_DIR / "scheduler.stderr.log",
+                          "a", encoding="utf-8", buffering=1)
+        ts = datetime.now(timezone.utc).isoformat()
+        sys.stderr.write(f"\n=== {ts} pythonw startup ===\n")
+        sys.stderr.flush()
+    except Exception:
+        # Si la redirección falla, no rompemos el arranque del bot —
+        # solo perderemos prints/tracebacks no manejados.
+        pass
+
+
+_redirect_stdio_if_pythonw()
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
