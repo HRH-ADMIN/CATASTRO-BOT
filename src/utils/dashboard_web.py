@@ -1044,23 +1044,66 @@ def _render_html(refresh_sec: int = 30) -> str:
     </div>
     """
 
+    # NOTA U-04 paso 6 (2026-05-22):
+    # Eliminado <meta http-equiv="refresh" content="N"> — el browser ya no
+    # hace full reload cada 30s. En su lugar, cliente JS abre EventSource
+    # contra /api/events/stream y recarga la fila/página afectada.
+    # Fallback: si SSE no está disponible (endpoint legacy stdlib server
+    # SIN flask), el `refresh_sec` se respeta como antes via `noscript`.
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="refresh" content="{refresh_sec}">
+    <noscript>
+        <!-- Fallback: si JS está deshabilitado, refresh full-page legacy -->
+        <meta http-equiv="refresh" content="{refresh_sec}">
+    </noscript>
     <title>Catastro Bot — Dashboard</title>
     <style>{_CSS}</style>
+    <style>
+    /* Indicador de sincronización live (U-04 paso 6) */
+    #live-status {{
+        display: inline-flex; align-items: center; gap: 6px;
+        font-size: 12px; padding: 3px 10px; border-radius: 12px;
+        background: #1e293b; color: #94a3b8;
+        transition: background-color 0.3s, color 0.3s;
+    }}
+    #live-status::before {{
+        content: ""; width: 8px; height: 8px; border-radius: 50%;
+        background: #6b7280;
+    }}
+    #live-status.ok::before {{ background: #10b981; animation: pulse 2s ease-in-out infinite; }}
+    #live-status.warn::before {{ background: #f59e0b; }}
+    #live-status.err::before {{ background: #ef4444; }}
+    #live-status.ok    {{ color: #34d399; }}
+    #live-status.warn  {{ color: #fbbf24; }}
+    #live-status.err   {{ color: #f87171; }}
+    @keyframes pulse {{
+        0%, 100% {{ opacity: 1; }}
+        50% {{ opacity: 0.4; }}
+    }}
+    /* Flash visual cuando una fila se actualiza por SSE */
+    tr.row-flash {{
+        animation: row-flash-anim 1.2s ease-out;
+    }}
+    @keyframes row-flash-anim {{
+        0%  {{ background: rgba(96, 165, 250, 0.35); }}
+        100% {{ background: transparent; }}
+    }}
+    </style>
 </head>
 <body>
     <header>
         <h1>📐 Catastro Bot — Dashboard</h1>
         <div class="meta">
-            Última actualización: <strong>{now}</strong> &nbsp;|&nbsp;
+            Última actualización (server): <strong>{now}</strong> &nbsp;|&nbsp;
             Total expedientes: <strong>{len(exps)}</strong> &nbsp;|&nbsp;
-            Auto-refresh cada {refresh_sec}s &nbsp;|&nbsp;
-            <a href="/" style="color:#60a5fa">refrescar ahora</a>
+            <span id="live-status" title="Estado de la conexión live (SSE)">
+                <span id="live-status-text">conectando…</span>
+            </span>
+            &nbsp;|&nbsp;
+            <a href="/" style="color:#60a5fa" id="reload-now">refrescar ahora</a>
         </div>
     </header>
     <div class="container">
@@ -1078,13 +1121,108 @@ def _render_html(refresh_sec: int = 30) -> str:
                     <th>Próximo paso</th>
                 </tr>
             </thead>
-            <tbody>{rows_html}</tbody>
+            <tbody id="expedientes-tbody">{rows_html}</tbody>
         </table>
     </div>
     <footer>
         Catastro Bot &middot; Datos locales en C:\\catastro-bot\\data\\catastro.db &middot;
-        <a href="/api/expedientes">/api/expedientes</a> (JSON)
+        <a href="/api/expedientes">/api/expedientes</a> (JSON) &middot;
+        <a href="/api/events/stream">/api/events/stream</a> (SSE)
     </footer>
+
+    <script>
+    // ─── SSE client (U-04 paso 6) ──────────────────────────────────────
+    // Conecta a /api/events/stream y reacciona a:
+    //   - 'hello' / 'heartbeat'    → mantener UI en 'ok'.
+    //   - 'expediente_updated'     → flash fila + full reload (simple y
+    //                                robusto; mejorable a row-patch en
+    //                                el futuro si se nota lag).
+    //   - 'control_state_changed'  → reload (panel del bot puede cambiar).
+    // Si la conexión se pierde, el browser reintenta automáticamente via
+    // retry directive enviado por el server. Si pasa >2 min sin eventos,
+    // mostramos warning visual.
+    (function () {{
+        var statusEl = document.getElementById("live-status");
+        var statusText = document.getElementById("live-status-text");
+        var lastEventTs = Date.now();
+        var reloadDebounce = null;
+
+        function setStatus(klass, text) {{
+            if (!statusEl) return;
+            statusEl.classList.remove("ok", "warn", "err");
+            statusEl.classList.add(klass);
+            if (statusText) statusText.textContent = text;
+        }}
+
+        function scheduleReload() {{
+            // Debounce: si llegan muchos eventos seguidos (ej. apt-sync que
+            // toca varios expedientes), un solo reload los cubre todos.
+            if (reloadDebounce) clearTimeout(reloadDebounce);
+            reloadDebounce = setTimeout(function () {{ window.location.reload(); }}, 350);
+        }}
+
+        function flashRow(numero) {{
+            // Buscar la fila por número de expediente. El renderer
+            // pone el numero en la primera celda como texto.
+            var rows = document.querySelectorAll("#expedientes-tbody tr");
+            for (var i = 0; i < rows.length; i++) {{
+                var first = rows[i].querySelector("td");
+                if (first && first.textContent.indexOf(numero) !== -1) {{
+                    rows[i].classList.remove("row-flash");
+                    // forzar reflow para reiniciar la animación
+                    void rows[i].offsetWidth;
+                    rows[i].classList.add("row-flash");
+                    break;
+                }}
+            }}
+        }}
+
+        if (!("EventSource" in window)) {{
+            setStatus("warn", "sin SSE — refrescá manualmente");
+            return;
+        }}
+        var es = new EventSource("/api/events/stream");
+
+        es.onopen = function () {{
+            setStatus("ok", "live ✓");
+            lastEventTs = Date.now();
+        }};
+
+        es.onmessage = function (e) {{
+            lastEventTs = Date.now();
+            setStatus("ok", "live ✓");
+            try {{
+                var data = JSON.parse(e.data);
+                if (data.type === "expediente_updated") {{
+                    if (data.numero_expediente) flashRow(data.numero_expediente);
+                    scheduleReload();
+                }} else if (data.type === "control_state_changed") {{
+                    scheduleReload();
+                }}
+                // 'hello' y 'heartbeat' solo refrescan lastEventTs (ya hecho arriba).
+            }} catch (err) {{
+                console.warn("SSE: payload no parseable", e.data);
+            }}
+        }};
+
+        es.onerror = function () {{
+            setStatus("err", "reconectando…");
+            // EventSource reconecta solo (con el retry hint del server).
+        }};
+
+        // Watchdog visual: si pasa >2 min sin eventos (ni heartbeat),
+        // marcar conexión como degradada. El server manda heartbeat
+        // cada 25s así que en condiciones normales esto NUNCA dispara.
+        setInterval(function () {{
+            var silencio_ms = Date.now() - lastEventTs;
+            if (silencio_ms > 120000) {{
+                setStatus("warn", "sin actividad >2 min");
+            }} else if (silencio_ms > 60000) {{
+                setStatus("warn", "sin eventos recientes");
+            }}
+        }}, 10000);
+    }})();
+    </script>
 </body>
 </html>
 """
