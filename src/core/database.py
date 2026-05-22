@@ -158,6 +158,57 @@ BEGIN
     SELECT RAISE(FAIL, 'audit_log entries are immutable');
 END;
 
+-- ── Vista normalizada para el dashboard ──────────────────────────────────────
+-- v_expedientes_dashboard: SSOT calculado para la UI.
+--
+--   Expone solo las keys de metadata_json necesarias (no el JSON completo —
+--   defensa contra PII en endpoints) + columna `divergencia` que detecta
+--   cuando estado_actual del bot quedó atrás respecto a apt_estado/muni_estado.
+--
+-- Plan: PLAN_MEJORAS Sprint 1 / U-04 paso 4.
+-- Documentación canónica del schema: docs/SCHEMA.md §5.
+DROP VIEW IF EXISTS v_expedientes_dashboard;
+CREATE VIEW v_expedientes_dashboard AS
+SELECT
+    e.id,
+    e.numero_expediente,
+    e.tipo_plano,
+    e.estado_actual,
+    e.fecha_creacion,
+    e.fecha_actualizacion,
+    e.completado,
+    e.cancelado,
+    json_extract(e.metadata_json, '$.apt_estado')             AS apt_estado,
+    json_extract(e.metadata_json, '$.apt_estado_sync')        AS apt_estado_sync,
+    json_extract(e.metadata_json, '$.apt_tramite')            AS apt_tramite,
+    json_extract(e.metadata_json, '$.apt_numero')             AS apt_numero,
+    json_extract(e.metadata_json, '$.apt_fecha_presentacion') AS apt_fecha_presentacion,
+    json_extract(e.metadata_json, '$.muni_estado')            AS muni_estado,
+    json_extract(e.metadata_json, '$.muni_monto_pendiente')   AS muni_monto_pendiente,
+    json_extract(e.metadata_json, '$.nombre_proyecto')        AS nombre_proyecto,
+    json_extract(e.metadata_json, '$.provincia')              AS provincia,
+    json_extract(e.metadata_json, '$.canton')                 AS canton,
+    json_extract(e.metadata_json, '$.distrito')               AS distrito,
+    (SELECT COUNT(*) FROM estados_historial h
+      WHERE h.expediente_id = e.id)                            AS n_transiciones,
+    (SELECT MAX(timestamp) FROM estados_historial h
+      WHERE h.expediente_id = e.id)                            AS ultimo_evento_ts,
+    -- Detección de divergencia bot vs sistema externo
+    CASE
+        WHEN e.estado_actual IN ('presentado_apt_r1','enviado_cfia')
+             AND json_extract(e.metadata_json, '$.apt_estado') LIKE '%Defectuoso%'
+            THEN 'apt:defectuoso'
+        WHEN e.estado_actual IN ('presentado_apt_r1','enviado_cfia')
+             AND json_extract(e.metadata_json, '$.apt_estado') LIKE '%Inscrito%'
+            THEN 'apt:inscrito'
+        WHEN e.estado_actual IN ('enviado_muni','formulario_muni_enviado')
+             AND json_extract(e.metadata_json, '$.muni_estado') IN
+                 ('aprobado','rechazado','morosidad')
+            THEN 'muni:' || json_extract(e.metadata_json, '$.muni_estado')
+        ELSE NULL
+    END AS divergencia
+FROM expedientes e;
+
 -- ── Invariante: fecha_actualizacion siempre refleja la última mutación ────────
 -- Garantiza que cualquier UPDATE sobre columnas significativas de `expedientes`
 -- deje `fecha_actualizacion` apuntando a "ahora", incluso si el caller olvidó
