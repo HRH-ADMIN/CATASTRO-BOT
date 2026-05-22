@@ -32,10 +32,34 @@ irreversible.
 
 ## Setup
 
+### Con `uv` (recomendado — builds reproducibles desde `uv.lock`)
+
 ```powershell
-python setup.py
-python -m src.core.credential_manager   # configurar credenciales
+pip install uv                          # una vez
+uv sync                                 # instala runtime
+uv sync --extra dev                     # instala runtime + dev tools (ruff, mypy, pytest-cov)
+uv run python -m src.core.credential_manager   # configurar credenciales
+uv run python -m src.main
+```
+
+### Compat — `pip` clásico
+
+```powershell
+python setup.py                         # bootstrap inicial
+pip install -r requirements.txt         # autogenerado desde uv.lock
+python -m src.core.credential_manager
 python -m src.main
+```
+
+### Comandos de desarrollo
+
+```powershell
+uv run ruff check .                     # lint (no bloquea aún — soft-fail en CI)
+uv run ruff format .                    # formatter
+uv run mypy src/core                    # type-check estricto en core
+uv run pytest --cov=src                 # tests + cobertura
+uv lock --upgrade                       # actualizar deps al último compatible
+uv export --no-hashes -o requirements.txt   # regenerar requirements.txt
 ```
 
 ## Garantías de seguridad

@@ -1,0 +1,188 @@
+# pyproject.toml — catastro-bot
+#
+# Convención del proyecto:
+#   - `requirements.txt` queda como fuente histórica + compat con CI/runners
+#     que no tienen `uv`. Se regenera con:
+#         uv export --no-hashes --format requirements-txt > requirements.txt
+#   - `uv.lock` es la fuente de verdad para builds reproducibles.
+#   - Activar con `uv sync` en una clone limpia.
+#
+# Plan: PLAN_MEJORAS_catastro-bot_3.md Sprint 3 / O-10 + ruff/mypy/pytest-cov.
+
+[project]
+name = "catastro-bot"
+version = "0.1.0"
+description = "Sistema multi-agente de automatización catastral para Costa Rica (Ley 6545)."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "Proprietary — Luis Alonso Rojas Herrera (CFIA IT-10676)" }
+authors = [{ name = "Luis Alonso Rojas Herrera", email = "topografiahrh@gmail.com" }]
+
+dependencies = [
+    # Automatización browser
+    "playwright>=1.45.0",
+    "watchdog>=4.0.0",
+    # PDFs y archivos catastrales
+    "PyMuPDF>=1.24.0",
+    "ezdxf>=1.1.0",
+    "pypdf>=4.0.0",
+    # Persistencia (sqlcipher solo Linux; en Windows DEV_MODE)
+    "sqlcipher3-binary>=0.5.2; sys_platform == 'linux'",
+    # Windows + Credenciales
+    "pywin32>=306; sys_platform == 'win32'",
+    "keyring>=24.3.0",
+    "cryptography>=42.0.0",
+    # Google APIs
+    "google-api-python-client>=2.100.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth-httplib2>=0.2.0",
+    # IA y servicios externos
+    "anthropic>=0.30.0",
+    "requests>=2.31.0",
+    "tenacity>=8.2.0",
+    # Scheduling + validación
+    "APScheduler>=3.10.4",
+    "pydantic>=2.7.0",
+    "python-dotenv>=1.0.1",
+    # Dashboard web
+    "flask>=3.0.0",
+    "waitress>=3.0.0",
+    # Config + PDFs + notificaciones Windows
+    # (faltaban en requirements.txt original — detectadas al migrar a uv 2026-05-22)
+    "pyyaml>=6.0",                          # src/utils/muni_config.py lee munis.yaml
+    "reportlab>=4.0",                       # tools/generar_pdf_*.py (esquema, pendientes, arquitectura)
+    "winotify>=1.1.0; sys_platform == 'win32'",   # src/utils/desktop_notify.py toasts
+]
+
+[project.optional-dependencies]
+# Herramientas de desarrollo. Instalar con `uv sync --extra dev`.
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+]
+
+[project.urls]
+Repository = "https://github.com/HRH-ADMIN/CATASTRO-BOT"
+
+[build-system]
+# Pseudo build system; no construimos wheel, pero esto satisface PEP 517.
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ruff — linter + formatter en uno (reemplaza flake8 + black + isort)
+# Empezamos PERMISIVOS: solo errores que importan de verdad. Vamos endureciendo
+# por iteración. CI corre con `continue-on-error: true` por ahora.
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = [
+    ".venv",
+    "build",
+    "dist",
+    "data",
+    "logs",
+    "tools/oneshots",     # one-shots históricos; no exigimos lint hasta limpieza
+]
+
+[tool.ruff.lint]
+# Reglas iniciales — conservadoras. Subir progresivamente.
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes (variables sin usar, imports sin usar, etc.)
+    "W",    # pycodestyle warnings
+    "I",    # isort (orden de imports)
+    "B",    # flake8-bugbear (anti-patrones comunes)
+    "UP",   # pyupgrade (sintaxis modernizable)
+    "C4",   # comprehensions
+    "RET",  # returns (bugs en branchings de return)
+    "SIM",  # simplifications
+]
+ignore = [
+    "E501",   # line too long — ruff format se encarga
+    "B008",   # function call in default arg — usado intencional en algunos helpers
+    "SIM108", # ternary en lugar de if/else — a veces el if/else es más legible
+    "RET504", # variable redundante antes de return — a veces ayuda al debugger
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011", "F841"]  # asserts y variables locales en fixtures
+"tools/**" = ["E402"]          # imports después de sys.path modifications
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# mypy — type checker
+# Empieza permisivo (todo el código sin annotations no falla). Solo `src.core`
+# arranca con strict para forzar disciplina en la capa más crítica.
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.13"
+strict = false
+warn_return_any = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+ignore_missing_imports = true  # muchas deps externas sin stubs
+exclude = [
+    "tools/oneshots/",
+    "tools/_audit_.*",
+    "build/",
+    "dist/",
+    "\\.venv/",
+]
+
+[[tool.mypy.overrides]]
+module = "src.core.*"
+# La capa core empieza estricta — es donde viven audit_log, secret_store, BD.
+strict = true
+disallow_untyped_defs = true
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pytest + cobertura
+# Estos overrides se mergean con pytest.ini (legacy). Cuando confirmemos que
+# todo el equipo (= el operador) usa pyproject, eliminamos pytest.ini.
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--basetemp=.pytest_tmp",
+    # Coverage activable con `pytest --cov` (no lo metemos en addopts default
+    # para no penalizar corridas locales rápidas).
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+tmp_path_retention_count = 3
+tmp_path_retention_policy = "failed"
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "src/**/__init__.py",
+    "src/**/_legacy/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+show_missing = true
+skip_covered = false
+precision = 1
