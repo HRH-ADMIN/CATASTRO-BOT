@@ -1,0 +1,67 @@
+# Datos sensibles - nunca commitear
+data/
+logs/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Credenciales locales (deben vivir solo en Windows Credential Manager / DPAPI)
+.env
+*.env
+credentials.json
+token.json
+client_secret*.json
+*_credentials.json
+*_oauth*.json
+clave*.txt
+clave*.key
+*.key
+*.pem
+secrets.enc
+data/secrets.enc
+
+# Estados de Playwright (pueden contener cookies de sesión)
+auth_state*.json
+playwright_state*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude Code (config local de cada operador)
+.claude/
+
+# Pytest tmp / artifacts
+.pytest_tmp/
+htmlcov/
+.coverage
+.coverage.*
+
+# Logs sueltos en raíz (logs/ ya excluido arriba)
+bot_live.log
+logsbot_*.log
+*.log
+
+# Backups locales con dump del proyecto (pueden contener datos sensibles)
+data/backups/
+*.zip

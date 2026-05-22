@@ -1,0 +1,139 @@
+# Configuración de Municipalidades atendidas por el bot.
+#
+# Cada muni define su flujo (formulario web, email, presencial), sus
+# códigos, formatos y contactos. El código del bot lee esto via
+# `src/utils/muni_config.py::cargar_muni(canton_slug)`.
+#
+# Para agregar una muni nueva:
+#   1. Inspeccionar su formulario web / proceso operativo
+#   2. Agregar bloque aquí con sus campos
+#   3. Probar con un trámite real, refinar
+#   4. NO duplicar código — todo va aquí
+#
+# Estado:
+#   ✅ san_ramon: en producción (TILMAN enviado 2026-05-13)
+#   ⏳ poas:      pendiente — habrá que inspeccionar su formulario
+#   ⏳ otros cantones: agregar cuando lleguen trámites
+
+san_ramon:
+  nombre_legal: "Municipalidad de San Ramón"
+  provincia: "ALAJUELA"
+  canton: "SAN_RAMON"
+  canton_codigo: "02"
+
+  flujo_envio: "google_form"   # google_form | email | presencial | api
+
+  google_form:
+    form_id: "1FAIpQLSejhSph15X_RPtT39SjiLUYnCqjg_FB1Gq67A8mjgA-1XVXOQ"
+    requiere_login_google: true
+    captura_email: true
+    entries:
+      tomo:          "entry.413935745"
+      asiento:       "entry.112406539"
+      proyecto_apt:  "entry.1184863793"
+      fecha_minuta:  "entry.1421348955"   # split _year/_month/_day
+      area:          "entry.2015524080"
+      finca:         "entry.2090596021"
+      distrito:      "entry.1965655160"
+      proceso:       "entry.335206885"
+      tipo_acceso:   "entry.990422047"
+      vertices:      "entry.44837579"
+      profesional:   "entry.299608996"
+      carne:         "entry.1470141826"
+      # Archivos (no se pre-llenan via URL — se suben con picker)
+      documentos:    "entry.702941744"
+      archivo_shape: "entry.125723641"
+
+  email_correcciones: "mgamboa@sanramon.go.cr"
+  asunto_corregido: "Trámite CORREGIDO APT 2016 - {tramite}"
+  asunto_resello:   "Trámite RESELLO APT 2016 - {tramite}"
+
+  distritos:
+    "01 San Ramón":     "01"
+    "02 Santiago":      "02"
+    "03 San Juan":      "03"
+    "04 Piedades Norte": "04"
+    "05 Piedades Sur":  "05"
+    "06 San Rafael":    "06"
+    "07 San Isidro":    "07"
+    "08 Ángeles":       "08"
+    "09 Alfaro":        "09"
+    "10 Volio":         "10"
+    "11 Concepción":    "11"
+    "12 Zapotal":       "12"
+    "13 Peñas Blancas": "13"
+    "14 San Lorenzo":   "14"
+
+  procesos:
+    segregacion:        "Segregación"
+    reunion_de_fincas:  "Segregar y Reunir"
+    rectificacion:      "Validación de Vía Pública"
+    informacion_posesoria: "Localizar Derecho"
+    fincas_completas:   "Localizar Derecho"
+
+  tipos_acceso:
+    - "Ruta Cantonal"
+    - "Ruta Nacional  Nº 01"
+    - "Ruta Nacional  Nº 135"
+    - "Ruta Nacional Nº 156"
+    - "Ruta Nacional Nº 169"
+    - "Ruta Nacional Nº 702"
+    - "Ruta Nacional  Nº 703"
+    - "Ruta Nacional Nº 704"
+    - "Ruta Nacional Nº 705"
+    - "Ruta Nacional Nº 713"
+    - "Ruta Nacional N°725"
+    - "Ruta Nacional Nº 742"
+    - "Ruta Nacional Naranjo - Florencia"
+    - "Servidumbre de Paso"
+    - "Acceso excepcional uso residencial"
+    - "Servidumbre Pecuaria"
+    - "Servidumbre Forestal"
+    - "Servidumbre Mixta"
+    - "Servidumbre Agrícola"
+
+  visor:
+    url: "https://visor.sanramon.go.cr/"
+    capas_calle:
+      - "cbox_vias_cantonales"
+      - "cbox_rutas_nacionales"
+    requiere_aceptar_condiciones: true
+
+  validaciones_iniciales:
+    - "Propietario al día con impuestos municipales"
+    - "Declaración de bienes inmuebles vigente"
+
+  formato_campos:
+    finca:
+      patron: "{provincia} {numero}-{derecho}"      # ej "2 629270-000"
+      separador_varias: "/"
+    carne:
+      patron: "it-{numero}"                          # ej "it-10676"
+      transformar: "lowercase"
+    nombre_profesional:
+      orden: "nombres_primero"                       # CFIA: ap1 ap2 nom; muni: nom ap1 ap2
+      caso: "lowercase"
+    vertices:
+      formato: "lista_guion"                         # "1-2-3-4" no "4"
+      origen: "vertices_que_enfrentan_a_via"        # NO total polígono
+
+# ─── Poás (pendiente — completar cuando aparezca primer trámite) ───
+poas:
+  nombre_legal: "Municipalidad de Poás"
+  provincia: "ALAJUELA"
+  canton: "POAS"
+  canton_codigo: "08"
+  flujo_envio: null                                # pendiente investigar
+  pendiente: |
+    Investigar:
+    - ¿Tiene formulario web propio? ¿Mismo Google Form que SR (compartido)?
+    - ¿Email contacto catastral?
+    - ¿Distritos: San Pedro (01), San Juan (02), San Rafael (03),
+      Carrillos (04), Sabana Redonda (05)?
+    - ¿Mismo proceso operativo que SR? (verifica impuestos primero)
+  distritos:
+    "01 San Pedro":      "01"
+    "02 San Juan":       "02"
+    "03 San Rafael":     "03"
+    "04 Carrillos":      "04"
+    "05 Sabana Redonda": "05"
