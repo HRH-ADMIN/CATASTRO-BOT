@@ -69,8 +69,11 @@ def _cmd_dashboard(extra_args: list[str]) -> int:
     return _ejecutar_tool("dashboard.py", extra_args)
 
 
-def _cmd_backup(extra_args: list[str]) -> int:
-    return _ejecutar_tool("backup_db.py", extra_args)
+# Nota: el handler `_cmd_backup` está más abajo (línea ~119) y apunta a
+# `src.utils.backup_completo`, que es el flujo completo (BD + .env + config +
+# código + LEEME). Hubo una definición previa apuntando a `backup_db.py` que
+# quedaba sobrescrita silenciosamente — eliminada en housekeeping 2026-05-22
+# (ver PLAN_MEJORAS_catastro-bot_3.md sección "Bugs varios documentados", #1).
 
 
 def _cmd_apt_crear(extra_args: list[str]) -> int:
