@@ -158,6 +158,35 @@ BEGIN
     SELECT RAISE(FAIL, 'audit_log entries are immutable');
 END;
 
+-- ── Invariante: fecha_actualizacion siempre refleja la última mutación ────────
+-- Garantiza que cualquier UPDATE sobre columnas significativas de `expedientes`
+-- deje `fecha_actualizacion` apuntando a "ahora", incluso si el caller olvidó
+-- setearla en el SET.
+--
+-- Diseño:
+--   - Trigger AFTER UPDATE OF <cols>: solo se dispara si una de esas columnas
+--     cambió explícitamente (no se dispara en UPDATEs que solo tocan
+--     fecha_actualizacion, evitando recursión).
+--   - WHEN NEW.fecha_actualizacion = OLD.fecha_actualizacion: solo actúa si
+--     el caller NO seteó la fecha (camino "olvido"). Si el caller la setea
+--     explícitamente, respeta su valor.
+--   - PRAGMA recursive_triggers (OFF por default en SQLite) previene loops.
+--
+-- Plan: PLAN_MEJORAS_catastro-bot_3.md Sprint 1 / U-04 paso 3.
+-- Documentado en docs/SCHEMA.md §3.
+CREATE TRIGGER IF NOT EXISTS expedientes_touch_fecha_actualizacion
+AFTER UPDATE OF estado_actual, metadata_json, completado, cancelado,
+                nombre_topografo, cedula_topografo, telefono_cliente,
+                nombre_cliente, municipalidad
+ON expedientes
+FOR EACH ROW
+WHEN NEW.fecha_actualizacion = OLD.fecha_actualizacion
+BEGIN
+    UPDATE expedientes
+       SET fecha_actualizacion = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE id = NEW.id;
+END;
+
 -- ── Usuarios y roles ──────────────────────────────────────────────────────────
 -- Roles: admin (todo), topografo (crear+aprobar propios), asistente (crear+ver)
 CREATE TABLE IF NOT EXISTS usuarios (
