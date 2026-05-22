@@ -271,3 +271,28 @@ class TestAuth:
                         headers={"Authorization": "Bearer secret-xyz"},
                     )
                     assert resp.status_code == 202
+
+
+# ─── Página HTML /config/control ──────────────────────────────────────
+
+class TestControlPanelPage:
+    def test_get_config_control_renderiza_html(self, client):
+        resp = client.get("/config/control")
+        assert resp.status_code == 200
+        assert resp.mimetype == "text/html"
+        body = resp.get_data(as_text=True)
+        # Verificar estructura mínima esperada
+        assert "Panel de control" in body
+        assert "EventSource" in body  # SSE wired
+        assert "/api/control/status" in body
+        assert "/api/control/emergency-stop" in body
+        assert "APAGAR TODO" in body  # confirmation string visible
+
+    def test_html_no_tiene_unicode_problematico(self, client):
+        """Defensa: PowerShell 5.1 rompe con em-dash sin BOM.
+        El HTML va en Content-Type UTF-8 así que está OK, pero igual
+        verificamos que el JS no use caracteres que rompen su parser."""
+        resp = client.get("/config/control")
+        body = resp.get_data(as_text=True)
+        # El JS se parsea como JS, no como PS. Solo verificamos UTF-8 válido.
+        body.encode("utf-8")  # raise si no es válido

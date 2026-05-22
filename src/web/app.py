@@ -107,6 +107,20 @@ def create_app() -> Flask:
             "Cache-Control": "no-store",
         }
 
+    @app.route("/config/control", methods=["GET"])
+    def control_panel_page():
+        """Panel de control de módulos (U-03 paso 2.3).
+
+        Standalone page que consume /api/control/* + SSE para mostrar
+        el estado live de cada módulo y permitir transiciones con
+        confirmación + audit.
+        """
+        from src.utils.dashboard_control_html import render_control_panel_html
+        return render_control_panel_html(), 200, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+        }
+
     @app.route("/config/set", methods=["POST"])
     def config_set():
         # Mismas reglas de auth que /api/state — sólo si hay token configurado
