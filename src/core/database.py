@@ -568,14 +568,17 @@ class Database:
         if nuevo_estado not in Estado.values():
             raise DatabaseError(f"estado inválido: {nuevo_estado!r}")
         now = _now_iso()
+        numero_expediente: Optional[str] = None
         with self._transaction() as conn:
             row = conn.execute(
-                "SELECT estado_actual FROM expedientes WHERE id = ?",
+                "SELECT estado_actual, numero_expediente "
+                "  FROM expedientes WHERE id = ?",
                 (expediente_id,),
             ).fetchone()
             if not row:
                 raise DatabaseError(f"expediente {expediente_id!r} no encontrado")
             estado_anterior = row["estado_actual"]
+            numero_expediente = row["numero_expediente"]
             if estado_anterior == nuevo_estado:
                 return
             conn.execute(
@@ -601,6 +604,21 @@ class Database:
                 accion="expediente.cambiar_estado",
                 detalles={"de": estado_anterior, "a": nuevo_estado, "detalles": detalles},
             )
+        # Publisher SSE — fuera de la transacción, así los subscribers que
+        # re-consulten la BD ven el estado ya commiteado. Import diferido
+        # para evitar dependencia circular y para que tests puedan resetear.
+        try:
+            from src.utils.event_bus import publish_expediente_updated
+            publish_expediente_updated(
+                expediente_id=expediente_id,
+                numero_expediente=numero_expediente or "",
+                estado_actual=nuevo_estado,
+                actor=actor,
+                accion="cambiar_estado",
+            )
+        except Exception:
+            # Eventos son best-effort; nunca propagar al caller.
+            pass
 
     def historial_estados(self, expediente_id: str) -> list[dict]:
         with self.connect() as conn:
@@ -740,13 +758,18 @@ class Database:
         Campos existentes no mencionados en `nuevos_campos` se preservan.
         Util para guardar valores como apt_tramite, numero_muni, etc.
         """
+        numero_expediente: Optional[str] = None
+        estado_actual: Optional[str] = None
         with self._transaction() as conn:
             row = conn.execute(
-                "SELECT metadata_json FROM expedientes WHERE id = ?",
+                "SELECT metadata_json, numero_expediente, estado_actual "
+                "  FROM expedientes WHERE id = ?",
                 (expediente_id,),
             ).fetchone()
             if not row:
                 raise DatabaseError(f"expediente {expediente_id!r} no encontrado")
+            numero_expediente = row["numero_expediente"]
+            estado_actual = row["estado_actual"]
             meta = json.loads(row["metadata_json"] or "{}")
             meta.update(nuevos_campos)
             conn.execute(
@@ -758,6 +781,18 @@ class Database:
                 accion="expediente.actualizar_metadata",
                 detalles={"campos": list(nuevos_campos.keys())},
             )
+        # Publisher SSE — best-effort, fuera de la transacción.
+        try:
+            from src.utils.event_bus import publish_expediente_updated
+            publish_expediente_updated(
+                expediente_id=expediente_id,
+                numero_expediente=numero_expediente or "",
+                estado_actual=estado_actual or "",
+                actor=actor,
+                accion="actualizar_metadata",
+            )
+        except Exception:
+            pass
 
     def buscar_por_mega_path(self, mega_path: str) -> Optional[dict]:
         """Busca un expediente cuyo metadata_json["mega_path"] sea el dado.

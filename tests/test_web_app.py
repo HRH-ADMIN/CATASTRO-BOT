@@ -124,3 +124,39 @@ def test_create_app_idempotent():
     app2 = create_app()
     assert app1 is not app2  # apps distintas
     assert app1.name == app2.name == "catastro-bot"
+
+
+# ─── SSE endpoint (U-04 paso 5) ───────────────────────────────────────
+
+def test_sse_endpoint_responde_mimetype_correcto(client):
+    """El endpoint /api/events/stream debe responder con text/event-stream
+    y al menos un evento 'hello' inicial."""
+    # Usamos stream=True para no agotar el generator infinito
+    resp = client.get("/api/events/stream", buffered=False)
+    assert resp.status_code == 200
+    assert resp.mimetype == "text/event-stream"
+
+    # Leer los primeros bytes — deben contener el 'hello' inicial
+    chunks = []
+    bytes_leidos = 0
+    for chunk in resp.response:
+        chunks.append(chunk if isinstance(chunk, str) else chunk.decode("utf-8"))
+        bytes_leidos += len(chunks[-1])
+        if bytes_leidos > 100:  # suficiente para ver el hello
+            break
+    body = "".join(chunks)
+    resp.close()
+
+    # Formato SSE válido: 'retry: ...' y 'data: ...'
+    assert "retry:" in body
+    assert "data:" in body
+    assert "hello" in body, f"primer evento debe ser 'hello', vio: {body[:200]!r}"
+
+
+def test_sse_headers_no_cache(client):
+    """Defensa: SSE no debe ser cacheable por proxies/browsers."""
+    resp = client.get("/api/events/stream", buffered=False)
+    assert resp.status_code == 200
+    cache_ctl = resp.headers.get("Cache-Control", "")
+    assert "no-cache" in cache_ctl
+    resp.close()
