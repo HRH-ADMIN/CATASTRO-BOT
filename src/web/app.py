@@ -207,6 +207,128 @@ def create_app() -> Flask:
         )
         return jsonify(new_state.to_dict())
 
+    # ──────── Revisiones pre-envío (Sprint 5 / N-02) ───────────────────
+    # Cola de revisión visual antes del click irreversible "Enviar al CFIA".
+
+    @app.route("/api/revisiones/pendientes", methods=["GET"])
+    def api_revisiones_pendientes():
+        from config.settings import DATABASE_PATH
+        from src.utils import pre_envio_snapshot as _pes
+        return jsonify({"revisiones": _pes.listar_pendientes(DATABASE_PATH)})
+
+    @app.route("/api/revisiones/<rev_id>", methods=["GET"])
+    def api_revision_detalle(rev_id: str):
+        from config.settings import DATABASE_PATH
+        from src.utils import pre_envio_snapshot as _pes
+        rev = _pes.read_revision(DATABASE_PATH, rev_id)
+        if rev is None:
+            return jsonify({"error": "no encontrado"}), 404
+        return jsonify(rev)
+
+    @app.route("/api/revisiones/<rev_id>/screenshot.png", methods=["GET"])
+    def api_revision_screenshot(rev_id: str):
+        """Sirve el screenshot del portal CFIA capturado al crear la
+        revisión. Defensa contra path traversal: solo sirve archivos
+        bajo data/revisiones/ del proyecto.
+        """
+        from pathlib import Path
+        from flask import send_file
+        from config.settings import DATABASE_PATH
+        from src.utils import pre_envio_snapshot as _pes
+        rev = _pes.read_revision(DATABASE_PATH, rev_id)
+        if rev is None or not rev.get("screenshot_path"):
+            return jsonify({"error": "sin screenshot"}), 404
+        # Resolver path bajo ROOT del proyecto
+        try:
+            from src.utils.dashboard_web import ROOT  # noqa: F401
+            root = ROOT
+        except (ImportError, AttributeError):
+            root = Path.cwd()
+        p = (root / rev["screenshot_path"]).resolve()
+        revisiones_dir = (root / "data" / "revisiones").resolve()
+        try:
+            p.relative_to(revisiones_dir)
+        except (ValueError, OSError):
+            return jsonify({"error": "path fuera de data/revisiones"}), 403
+        if not p.exists():
+            return jsonify({"error": "archivo no existe"}), 404
+        return send_file(str(p), mimetype="image/png")
+
+    @app.route("/api/revisiones/<rev_id>/pdf", methods=["GET"])
+    def api_revision_pdf(rev_id: str):
+        """Sirve el PDF anverso. Path traversal defense: solo bajo data/."""
+        from pathlib import Path
+        from flask import send_file
+        from config.settings import DATABASE_PATH
+        from src.utils import pre_envio_snapshot as _pes
+        rev = _pes.read_revision(DATABASE_PATH, rev_id)
+        if rev is None or not rev.get("pdf_anverso_path"):
+            return jsonify({"error": "sin PDF"}), 404
+        try:
+            from src.utils.dashboard_web import ROOT  # noqa: F401
+            root = ROOT
+        except (ImportError, AttributeError):
+            root = Path.cwd()
+        p = (root / rev["pdf_anverso_path"]).resolve()
+        data_dir = (root / "data").resolve()
+        try:
+            p.relative_to(data_dir)
+        except (ValueError, OSError):
+            return jsonify({"error": "path fuera de data/"}), 403
+        if not p.exists():
+            return jsonify({"error": "PDF no existe"}), 404
+        return send_file(str(p), mimetype="application/pdf")
+
+    @app.route("/api/revisiones/<rev_id>/aprobar", methods=["POST"])
+    def api_revision_aprobar(rev_id: str):
+        denied = _require_auth_for_mutations()
+        if denied:
+            return jsonify(denied[0]), denied[1]
+        from config.settings import DATABASE_PATH
+        from src.utils import pre_envio_snapshot as _pes
+        actor = request.headers.get("X-Actor", "web_dashboard")
+        try:
+            result = _pes.aprobar(DATABASE_PATH, rev_id, resuelto_por=actor)
+        except KeyError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 409
+        return jsonify(result)
+
+    @app.route("/api/revisiones/<rev_id>/rechazar", methods=["POST"])
+    def api_revision_rechazar(rev_id: str):
+        denied = _require_auth_for_mutations()
+        if denied:
+            return jsonify(denied[0]), denied[1]
+        from config.settings import DATABASE_PATH
+        from src.utils import pre_envio_snapshot as _pes
+        data = request.get_json(silent=True) or {}
+        razon = (data.get("razon") or "").strip()
+        if not razon:
+            return jsonify({"error": "razon es obligatoria"}), 400
+        actor = request.headers.get("X-Actor", "web_dashboard")
+        try:
+            result = _pes.rechazar(DATABASE_PATH, rev_id,
+                                    razon=razon, resuelto_por=actor)
+        except KeyError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 409
+        return jsonify(result)
+
+    @app.route("/expediente/<exp_id>/revisar-envio", methods=["GET"])
+    def revisar_envio_page(exp_id: str):
+        """Página side-by-side de revisión visual.
+
+        Si no hay revisión pendiente para el expediente, redirige al
+        dashboard principal con flash.
+        """
+        from src.utils.dashboard_revision_html import render_revision_panel_html
+        return render_revision_panel_html(exp_id), 200, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+        }
+
     # ──────────── API costs Anthropic (Sprint 4 / O-08) ────────────────
 
     @app.route("/api/costs/summary", methods=["GET"])
