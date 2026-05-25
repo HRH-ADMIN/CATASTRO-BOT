@@ -96,6 +96,11 @@ def _cmd_apt_enviar(extra_args: list[str]) -> int:
     return _ejecutar_tool("apt_enviar.py", extra_args)
 
 
+def _cmd_apt_revisar(extra_args: list[str]) -> int:
+    """Crea una revisión pre-envío manual (Sprint 5 / N-02)."""
+    return _ejecutar_tool("apt_revisar.py", extra_args)
+
+
 def _cmd_apt_flujo(extra_args: list[str]) -> int:
     return _ejecutar_tool("apt_flujo.py", extra_args)
 
@@ -265,6 +270,7 @@ SUBCOMANDOS: dict[str, tuple] = {
     "apt-guardar":   (_cmd_apt_guardar,   "Click GUARDAR del contrato"),
     "apt-r2":        (_cmd_apt_r2,        "Subir archivos APT R2 (anverso corregido + visado muni)"),
     "apt-enviar":    (_cmd_apt_enviar,    "Click ENVIAR AL CFIA del plano (no requiere FD)"),
+    "apt-revisar":   (_cmd_apt_revisar,   "Crear revisión pre-envío visual (N-02)"),
     "apt-flujo":     (_cmd_apt_flujo,     "TODO de corrido (crear+guardar+plano), pausa antes de enviar"),
     "resumen":       (_cmd_resumen,       "Resumen rápido de todos los planos y su estado"),
     "dashboard-web": (_cmd_dashboard_web, "Dashboard web bonito en http://localhost:9224 (auto-refresh)"),
