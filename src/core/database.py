@@ -158,6 +158,42 @@ BEGIN
     SELECT RAISE(FAIL, 'audit_log entries are immutable');
 END;
 
+-- ── Revisiones visuales pre-envío (Sprint 5 / N-02) ──────────────────────────
+-- Antes de hacer click irreversible en "Enviar al CFIA", el bot captura:
+--   - PDF anverso del plano (path relativo)
+--   - Screenshot del portal CFIA (PNG en data/revisiones/<rev_id>.png)
+--   - Snapshot DOM de los campos críticos (JSON serializable)
+--   - Lista de discrepancias seed vs portal (JSON)
+--
+-- El operador abre /expediente/<id>/revisar-envio, compara side-by-side y
+-- aprueba o rechaza. Solo después de 'aprobado' el bot dispara el click
+-- en #BtnEnviarAgrimensura.
+--
+-- Estados: 'pendiente' → 'aprobado' | 'rechazado' | 'expirada'.
+--
+-- Plan: PLAN_MEJORAS Sprint 5 / N-02.
+CREATE TABLE IF NOT EXISTS revisiones_pre_envio (
+    id                  TEXT PRIMARY KEY,
+    expediente_id       TEXT NOT NULL,
+    plano_id_apt        TEXT,                 -- nullable (revisión a nivel contrato)
+    estado              TEXT NOT NULL DEFAULT 'pendiente',
+    creado_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    resuelto_at         TEXT,
+    resuelto_por        TEXT,                 -- 'web_dashboard' / 'whatsapp:+506...'
+    razon_rechazo       TEXT,
+    pdf_anverso_path    TEXT,                 -- relativo a ROOT
+    screenshot_path     TEXT,                 -- relativo a ROOT (data/revisiones/<id>.png)
+    snapshot_dom_json   TEXT,                 -- JSON con campos bP1-bP4 leídos del portal
+    seed_json           TEXT,                 -- snapshot del datos_apt que iba a enviar
+    diff_json           TEXT,                 -- JSON list de discrepancias detectadas
+    n_discrepancias    INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (expediente_id) REFERENCES expedientes(id) ON DELETE CASCADE,
+    CHECK (estado IN ('pendiente','aprobado','rechazado','expirada'))
+);
+CREATE INDEX IF NOT EXISTS idx_revisiones_estado ON revisiones_pre_envio(estado);
+CREATE INDEX IF NOT EXISTS idx_revisiones_exp    ON revisiones_pre_envio(expediente_id);
+CREATE INDEX IF NOT EXISTS idx_revisiones_creado ON revisiones_pre_envio(creado_at);
+
 -- ── Costos de API Anthropic (Sprint 4 / O-08) ────────────────────────────────
 -- Una fila por llamada al cliente Anthropic con tokens consumidos +
 -- costo calculado en USD. Permite agregaciones diario/mensual + budget
