@@ -693,3 +693,126 @@ y costo USD calculado en tiempo real, expone agregaciones en
    quedan dentro de `output_tokens`.
 
 ---
+
+## N-02 — Cola de revisión visual pre-envío al CFIA
+
+**Sprint:** 5
+**Fecha de implementación:** 2026-05-22
+**Branch:** `sprint-5/n-02-revision-visual-pre-envio`
+
+### Por qué este cambio existe
+
+Hasta ahora `apt-enviar` hace click en `#BtnEnviarAgrimensura` sin pausa.
+Si los datos del portal CFIA no matchean lo que el bot creía estar
+enviando (bug del extractor, edición manual no reflejada, race condition),
+el envío irreversible sale incorrecto y hay que pelearla en R2.
+
+N-02 introduce una **cola de revisión humana** entre el llenado del
+portal y el click final:
+
+1. El bot captura un snapshot completo (PDF original + screenshot del
+   portal + DOM de campos críticos + diff seed vs portal).
+2. Persiste como `pendiente` en `revisiones_pre_envio`.
+3. El operador abre `/expediente/<id>/revisar-envio`, ve **side-by-side**
+   el PDF a la izquierda y el portal a la derecha + checklist de campos
+   críticos con check verde/rojo.
+4. Aprueba (el bot procede a hacer click) o rechaza con razón.
+
+### Procedimiento
+
+1. **Forzar una revisión manual** (sin pasar por el flujo de portal):
+   ```powershell
+   catastro-bot apt-revisar SEG-2026-005 --abrir-browser
+   ```
+   - El bot crea una entrada `pendiente` con el seed actual del expediente.
+   - Si `--abrir-browser` está presente, abre el panel en el navegador.
+   - El path al PDF anverso se infiere de
+     `data/files/<PROV>/<CANT>/<DIST>/<PROY>/01_Campo/amberso.pdf`.
+
+2. **Verificar el link en el dashboard:**
+   - Abrir `http://localhost:9224/`
+   - En el header debería aparecer `📋 1 revisión pendiente` en ámbar.
+   - Click → te lleva al panel `/expediente/<id>/revisar-envio`.
+
+3. **Verificar el panel side-by-side:**
+   - Panel izquierdo: PDF anverso (iframe).
+   - Panel central: screenshot del portal CFIA (o "Sin screenshot capturado"
+     si se creó manualmente sin Playwright).
+   - Panel derecho: checklist de cada campo del seed con check verde si
+     matchea o rojo si difiere. Bajo cada campo, los valores side-by-side
+     `seed: X / portal: Y`.
+
+4. **Probar rechazo:**
+   - Click "✗ Rechazar".
+   - Modal pide razón obligatoria (textarea).
+   - Si la dejás vacía, flash rojo `La razón es obligatoria.`
+   - Con razón → flash `✗ Rechazado.` y redirect a `/` tras 1.5s.
+
+5. **Probar aprobación:**
+   - Crear una nueva revisión.
+   - Click "✓ Aprobar y enviar".
+   - Si hay discrepancias, el modal muestra warning visual.
+   - Confirmar → flash `✓ Aprobado. El bot va a hacer click en Enviar.`
+   - En la BD, el row pasa a `aprobado` con `resuelto_por='web_dashboard'`.
+
+### Inspección via curl
+
+```powershell
+# Lista pendientes
+curl http://localhost:9224/api/revisiones/pendientes
+
+# Detalle de una revisión
+curl http://localhost:9224/api/revisiones/<rev_id>
+
+# Aprobar
+curl -X POST http://localhost:9224/api/revisiones/<rev_id>/aprobar
+
+# Rechazar con razón
+curl -X POST http://localhost:9224/api/revisiones/<rev_id>/rechazar `
+  -H "Content-Type: application/json" `
+  -d "{\"razon\":\"Falta verificar carta de agua\"}"
+```
+
+### Criterios de aceptación
+
+- [x] Tabla `revisiones_pre_envio` con estado pendiente→aprobado/rechazado.
+- [x] Captura de PDF anverso + screenshot del portal CFIA + diff seed vs portal.
+- [x] Endpoint REST completo (lista, detalle, serving de assets, aprobar/rechazar).
+- [x] Defensa de path traversal en serving (screenshot solo bajo
+      `data/revisiones/`, PDF solo bajo `data/`).
+- [x] Pantalla `/expediente/<id>/revisar-envio` side-by-side con
+      checklist + botones de aprobar/rechazar con confirmación modal.
+- [x] Link en header del dashboard principal cuando hay pendientes.
+- [x] Eventos SSE (`revision_pendiente`, `revision_resuelta`) refrescan
+      el link sin reload completo.
+- [x] Razón obligatoria al rechazar.
+- [x] CLI `catastro-bot apt-revisar <EXP-ID> [--pdf X] [--abrir-browser]`.
+- [x] Tests: **33 nuevos** (20 snapshot + 13 API).
+
+### Tests automatizados relacionados
+
+| Archivo | Tests | Cubre |
+|---|---|---|
+| `test_pre_envio_snapshot.py` | 20 | Schema, diff comparator, crear/leer/aprobar/rechazar |
+| `test_revisiones_api.py` | 13 | Endpoints REST + serving + página HTML |
+
+### Limitaciones conocidas
+
+1. **El `apt-enviar` actual NO está integrado todavía.** Hace click directo
+   en `#BtnEnviarAgrimensura` sin pasar por la cola de revisión.
+   Próxima iteración: agregar flag `--require-review` que cree la revisión
+   y bloquee hasta aprobación; el flag actual default mantiene compat con
+   el flujo de producción.
+2. **Si el operador aprueba la revisión, el bot NO dispara automáticamente
+   el click final.** El estado queda en `aprobado` pero el `apt-enviar`
+   real lo invoca el operador manualmente. Esto es defensa adicional —
+   próxima iteración puede agregar trigger automático con confirmación
+   doble si se quiere.
+3. **`apt-revisar` desde CLI crea snapshot_dom vacío** (no consulta el
+   portal). El uso esperado es desde el flujo de `apt-flujo` cuando se
+   integre — donde sí hay una `Page` de Playwright para capturar el DOM.
+4. **Revisiones expiradas no se purgan automáticamente.** Si quedan
+   pendientes >7 días, simplemente se acumulan. Próxima iteración:
+   job APScheduler que las marca como `expirada`.
+
+---

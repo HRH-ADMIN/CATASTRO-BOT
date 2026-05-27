@@ -1132,6 +1132,10 @@ def _render_html(refresh_sec: int = 30) -> str:
             &nbsp;|&nbsp;
             <a href="/config/costos" style="color:#60a5fa">💲 Costos</a>
             &nbsp;|&nbsp;
+            <span id="revisiones-link" style="display:none">
+                <a href="#" style="color:#fbbf24" id="revisiones-link-a"></a>
+                &nbsp;|&nbsp;
+            </span>
             <a href="/" style="color:#60a5fa" id="reload-now">refrescar ahora</a>
         </div>
     </header>
@@ -1206,6 +1210,37 @@ def _render_html(refresh_sec: int = 30) -> str:
         window._extServicesReload = loadStatus;  // expose para SSE
     }})();
 
+    // ─── Link de revisiones pendientes (N-02) ──────────────────────────
+    (function () {{
+        var linkEl = document.getElementById("revisiones-link");
+        var aEl = document.getElementById("revisiones-link-a");
+        if (!linkEl || !aEl) return;
+
+        function loadPendientes() {{
+            fetch("/api/revisiones/pendientes")
+                .then(function (r) {{ return r.json(); }})
+                .then(function (data) {{
+                    var revs = data.revisiones || [];
+                    if (!revs.length) {{
+                        linkEl.style.display = "none";
+                        return;
+                    }}
+                    // Mostrar la más vieja (FIFO) en el header
+                    var primera = revs[0];
+                    var url = "/expediente/" + encodeURIComponent(primera.expediente_id) + "/revisar-envio";
+                    var n = revs.length;
+                    aEl.href = url;
+                    aEl.textContent = "📋 " + n + " revisión" + (n > 1 ? "es" : "") + " pendiente" + (n > 1 ? "s" : "");
+                    linkEl.style.display = "inline";
+                }})
+                .catch(function () {{ /* ignore */ }});
+        }}
+
+        loadPendientes();
+        setInterval(loadPendientes, 30000);
+        window._revisionesReload = loadPendientes;
+    }})();
+
     // ─── SSE client (U-04 paso 6) ──────────────────────────────────────
     // Conecta a /api/events/stream y reacciona a:
     //   - 'hello' / 'heartbeat'    → mantener UI en 'ok'.
@@ -1276,6 +1311,9 @@ def _render_html(refresh_sec: int = 30) -> str:
                 }} else if (data.type === "external_service_changed") {{
                     // N-03: refresca el banner sin recargar la página
                     if (window._extServicesReload) window._extServicesReload();
+                }} else if (data.type === "revision_pendiente" || data.type === "revision_resuelta") {{
+                    // N-02: refresca el link de revisiones pendientes
+                    if (window._revisionesReload) window._revisionesReload();
                 }}
                 // 'hello' y 'heartbeat' solo refrescan lastEventTs (ya hecho arriba).
             }} catch (err) {{
