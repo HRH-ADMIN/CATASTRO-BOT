@@ -341,3 +341,154 @@ máquina), el próximo tick lo encuentra en `RUNNING` y ejecuta.
    "¿está vivo el sistema?".
 
 ---
+
+## U-02 — Procesos en background sin ventanas CMD
+
+**Sprint:** 1
+**Fecha de implementación:** 2026-05-22
+**Branch:** `sprint-1/u-02-runtime-processes`
+
+### Procedimiento de migración inicial (una sola vez)
+
+1. **Verificar que el venv tiene `pythonw.exe`:**
+   ```powershell
+   ls .venv\Scripts\pythonw.exe
+   ```
+   Si no existe, correr `uv sync` (vino con Python 3.13.13 por default).
+
+2. **Apagar el bot actual** (si está corriendo con el .bat viejo).
+   Cerrar todas las ventanas CMD del autostart.
+
+3. **Probar el .vbs manualmente** desde una terminal:
+   ```powershell
+   cscript //nologo tools\catastro_bot_autostart.vbs
+   ```
+   - **Esperado:** el comando devuelve inmediatamente (porque el .vbs lanza
+     y suelta).
+   - Verificar en Task Manager → Details que aparecen 3 procesos `pythonw.exe`
+     y 1 `chrome.exe` (del bot, perfil dedicado).
+   - **NO** debe aparecer ninguna ventana CMD/console.
+
+4. **Verificar en el dashboard que está todo vivo:**
+   - Abrir `http://localhost:9224/`
+   - Click en **"🖥️ Procesos"** en el header.
+   - Esperar 10-15 segundos.
+   - Verificar que la tabla muestra **`scheduler` con status `alive`**
+     y datos de CPU/RAM actualizados.
+   - Después de 30s, el job `process-monitor` corre y verifica que el
+     scheduler sigue vivo (heartbeat reciente).
+
+5. **Reemplazar autostart de Windows:**
+   - Abrir `shell:startup` (Win+R → escribir → Enter).
+   - Eliminar `catastro_bot_autostart.bat` (o renombrarlo a `.bat.viejo`).
+   - Crear shortcut o copia de `C:\catastro-bot\tools\catastro_bot_autostart.vbs`.
+   - **Recomendado:** crear shortcut en lugar de copiar, así futuras
+     actualizaciones del .vbs aplican al próximo reboot sin tener que
+     re-copiar.
+
+6. **Reiniciar Windows** para validar autostart completo.
+
+### Probar el panel /config/runtime
+
+1. Abrir `http://localhost:9224/config/runtime`.
+2. Verificar columnas: **Proceso, PID, Estado, Iniciado, Último heartbeat, CPU%, RAM, Acciones**.
+3. El proceso `scheduler` debería mostrar:
+   - Estado: badge `alive` verde pulsante.
+   - PID: el PID real del proceso `pythonw -m src.main`.
+   - Último heartbeat: actualizado hace <15 segundos.
+   - CPU%: número (depende de carga, suele ser <2%).
+   - RAM: ~150-300 MB.
+   - Botón **"📄 Ver log"** disponible.
+
+4. **Click en "Ver log"** sobre scheduler:
+   - Modal con tail del `logs/catastro-bot.log` (200 últimas líneas).
+   - Auto-refresh cada 2s habilitado por default.
+   - Scroll automático al final.
+   - Botón "Cerrar" detiene el polling.
+
+### Probar detección de proceso muerto
+
+1. Anotar el PID del `scheduler` desde el panel.
+2. En Task Manager, matar manualmente el proceso `pythonw.exe` con ese PID.
+3. **Esperado:**
+   - En el próximo `process-monitor` pass (cada 30s), el row se marca
+     `dead` con `reason=dead_pid`.
+   - El panel se actualiza vía SSE (chip live ✓ refresh la tabla).
+   - El badge del scheduler pasa de `alive` verde a `dead` rojo
+     **en ≤30 segundos**.
+4. (Opcional) En el dashboard principal, el panel de "Estado del bot"
+   debería reflejar que el scheduler está caído.
+
+### Probar detección de proceso colgado
+
+Para reproducir en tests manuales, modificar manualmente en BD:
+```powershell
+.venv\Scripts\python.exe -c "
+import sqlite3
+from datetime import datetime, timedelta, timezone
+viejo = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+conn = sqlite3.connect('data/catastro.db')
+conn.execute('UPDATE runtime_processes SET last_heartbeat_at = ? WHERE process_name = ?',
+             (viejo, 'scheduler'))
+conn.commit()
+print('Heartbeat forzado a 5 min atrás')
+"
+```
+
+En el próximo monitor pass (30s), el row se marca `hanging`. Para
+restaurar, parar y arrancar el scheduler.
+
+### Inspección directa via curl
+
+```powershell
+curl http://localhost:9224/api/runtime/processes
+curl "http://localhost:9224/api/runtime/processes?include_dead=1"
+curl "http://localhost:9224/api/runtime/logs/scheduler?tail=20"
+```
+
+### Verificación de redirect stdio bajo pythonw
+
+Cuando el bot corre bajo `pythonw.exe`, cualquier `print()` o traceback
+no manejado va a `logs/scheduler.stderr.log`. Verificar:
+```powershell
+ls logs\scheduler.stderr.log
+type logs\scheduler.stderr.log | Select-Object -Last 10
+```
+
+Debería contener al menos la línea `=== <timestamp> pythonw startup ===`
+cada vez que el bot arrancó.
+
+### Criterios de aceptación
+
+- [x] Tras reiniciar el bot vía autostart: **ninguna ventana CMD aparece**.
+- [x] Dashboard `/config/runtime` muestra `scheduler` con `alive`
+      y heartbeats actualizados (≤15s).
+- [x] "📄 Ver log" abre modal con tail del log.
+- [x] Matar el PID manualmente → el panel muestra `dead` en ≤30s.
+- [x] Logs de stdout/stderr no se pierden (van a `scheduler.stderr.log`
+      cuando corre bajo pythonw).
+
+### Tests automatizados relacionados
+
+| Archivo | Tests | Cubre |
+|---|---|---|
+| `test_runtime_processes.py` | 15 | Schema + register + heartbeat + mark_stopped + monitor pass + eventos SSE |
+| `test_runtime_api.py` | 9 | Endpoints REST + tail logs + defensa path traversal |
+| `test_pythonw_redirect.py` | 3 | Redirect stdio + .vbs ASCII puro |
+
+### Limitaciones conocidas
+
+1. **`process-monitor` solo registra**, no recupera. Si el scheduler muere,
+   el panel lo marca `dead` pero no se relanza solo. El operador debe
+   reiniciar manualmente (próxima iteración: integrar con la state
+   machine de U-03 para que `state=RUNNING + process=dead` dispare
+   autorestart con cooldown).
+2. **CPU%** mostrado puede ser bajo en la primera lectura — `psutil.cpu_percent(interval=None)`
+   devuelve 0 en el primer call. Después se estabiliza.
+3. **El `.vbs` no inicializa `runtime_processes`** para `chrome_bot` ni
+   `watchdog` — solo el `scheduler` se registra (porque `src.main` tiene
+   el hook). Para que los otros 2 aparezcan en el panel, el próximo
+   sprint debe agregar `register_process()` al inicio de
+   `start_chrome_bot.py` y `healthcheck.py`.
+
+---

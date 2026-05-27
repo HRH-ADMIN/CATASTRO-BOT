@@ -207,6 +207,86 @@ def create_app() -> Flask:
         )
         return jsonify(new_state.to_dict())
 
+    # ─────────────────── Runtime processes (U-02 paso B) ────────────────
+    # Capa SO: qué procesos están vivos.
+
+    @app.route("/api/runtime/processes", methods=["GET"])
+    def api_runtime_processes():
+        """Lista procesos alive + hanging + opcionalmente recent dead."""
+        from config.settings import DATABASE_PATH
+        from src.utils import runtime_processes as _rp
+        include_dead = request.args.get("include_dead", "").lower() in ("1", "true", "yes")
+        if include_dead:
+            data = _rp.list_all_recent(DATABASE_PATH, limit=50)
+        else:
+            data = _rp.list_alive(DATABASE_PATH)
+        return jsonify({"processes": data, "include_dead": include_dead})
+
+    @app.route("/api/runtime/logs/<process_name>", methods=["GET"])
+    def api_runtime_logs(process_name: str):
+        """Tail del log de un proceso. Solo lee el log_file_path declarado
+        por el propio proceso al register_process — no acepta paths
+        arbitrarios del cliente (defensa contra path traversal).
+
+        Query params:
+          tail=N (default 200) — últimas N líneas.
+        """
+        from config.settings import DATABASE_PATH
+        from src.utils import runtime_processes as _rp
+        # Whitelist: solo procesos que registraron log_file_path
+        rows = _rp.list_all_recent(DATABASE_PATH, limit=20)
+        matching = [r for r in rows if r["process_name"] == process_name]
+        if not matching:
+            return jsonify({"error": f"proceso {process_name!r} no registrado"}), 404
+        log_path = matching[0].get("log_file_path")
+        if not log_path:
+            return jsonify({"error": "proceso sin log_file_path declarado"}), 404
+
+        from pathlib import Path
+        p = Path(log_path)
+        # Defensa: el log_file_path declarado debe vivir bajo logs/ del proyecto
+        # (validación blanda — sirve como sanity check ante registros corruptos).
+        from config.settings import LOGS_DIR
+        try:
+            p.resolve().relative_to(LOGS_DIR.resolve())
+        except (ValueError, OSError):
+            return jsonify({
+                "error": "log_file_path fuera de logs/ — rechazado por seguridad",
+                "path": str(p),
+            }), 403
+
+        if not p.exists():
+            return jsonify({"error": "archivo no existe (todavía)", "path": str(p)}), 404
+
+        try:
+            n = max(1, min(int(request.args.get("tail", 200)), 1000))
+        except (TypeError, ValueError):
+            n = 200
+
+        try:
+            # Lectura simple — para logs grandes (>50MB) podría optimizarse
+            # leyendo desde el final con seek, pero por ahora es suficiente.
+            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception as exc:
+            return jsonify({"error": f"no se pudo leer: {exc}"}), 500
+
+        return jsonify({
+            "process_name": process_name,
+            "log_file_path": str(p),
+            "tail_lines": n,
+            "total_lines": len(lines),
+            "lines": lines[-n:],
+        })
+
+    @app.route("/config/runtime", methods=["GET"])
+    def runtime_panel_page():
+        """Panel HTML que lista procesos + permite ver logs en vivo."""
+        from src.utils.dashboard_runtime_html import render_runtime_panel_html
+        return render_runtime_panel_html(), 200, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+        }
+
     # ───────────────── Control State Machine (U-03 paso 2.2) ───────────
     # Reemplaza el modelo binario de /api/state con una máquina de estados
     # explícita que permite mostrar 'Apagando…' en lugar de saltos binarios.

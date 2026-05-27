@@ -1110,7 +1110,9 @@ def _render_html(refresh_sec: int = 30) -> str:
                 <span id="live-status-text">conectando…</span>
             </span>
             &nbsp;|&nbsp;
-            <a href="/config/control" style="color:#60a5fa">⚙️ Panel de control</a>
+            <a href="/config/control" style="color:#60a5fa">⚙️ Control</a>
+            &nbsp;|&nbsp;
+            <a href="/config/runtime" style="color:#60a5fa">🖥️ Procesos</a>
             &nbsp;|&nbsp;
             <a href="/" style="color:#60a5fa" id="reload-now">refrescar ahora</a>
         </div>

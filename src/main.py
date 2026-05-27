@@ -33,10 +33,44 @@ except ImportError:
     pass
 
 import argparse
+import io
 import signal
 import sys
 import threading
+from datetime import datetime, timezone
 from typing import Optional
+
+
+def _redirect_stdio_if_pythonw() -> None:
+    """Bajo `pythonw.exe` (sin consola), sys.stdout/stderr son `None` y
+    cualquier `print()` o traceback no manejado se PIERDE silenciosamente.
+    Redirigimos a `logs/scheduler.stdout.log` y `logs/scheduler.stderr.log`
+    para que el operador pueda ver pánicos via /config/runtime.
+
+    No interfiere con el logging.RotatingFileHandler — son canales distintos.
+
+    Plan: PLAN_MEJORAS Sprint 1 / U-02 paso C.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return  # estamos bajo python.exe con consola, no hace falta
+    try:
+        from config.settings import LOGS_DIR
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        # Apertura en modo append, line-buffered, encoding utf-8
+        sys.stdout = open(LOGS_DIR / "scheduler.stdout.log",
+                          "a", encoding="utf-8", buffering=1)
+        sys.stderr = open(LOGS_DIR / "scheduler.stderr.log",
+                          "a", encoding="utf-8", buffering=1)
+        ts = datetime.now(timezone.utc).isoformat()
+        sys.stderr.write(f"\n=== {ts} pythonw startup ===\n")
+        sys.stderr.flush()
+    except Exception:
+        # Si la redirección falla, no rompemos el arranque del bot —
+        # solo perderemos prints/tracebacks no manejados.
+        pass
+
+
+_redirect_stdio_if_pythonw()
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -196,6 +230,59 @@ class BotRuntime:
             replace_existing=True,
         )
 
+        # ── U-02: Tracking de procesos vivos ──────────────────────────
+        # Registra este proceso (scheduler) en runtime_processes y
+        # programa heartbeat cada 10s + monitor que detecta procesos
+        # colgados/muertos cada 30s.
+        from config.settings import DATABASE_PATH, LOGS_DIR
+        from src.utils import runtime_processes as _rp
+        self._rp_log_path = str(LOGS_DIR / "scheduler.log")
+        try:
+            _rp.register_process(
+                DATABASE_PATH,
+                process_name="scheduler",
+                log_file_path=self._rp_log_path,
+            )
+        except Exception:
+            self.log.exception("runtime_processes: register falló — sigo")
+
+        def _scheduler_heartbeat():
+            try:
+                _rp.heartbeat(DATABASE_PATH, process_name="scheduler")
+            except Exception:
+                self.log.exception("runtime_processes: heartbeat falló")
+
+        self._scheduler.add_job(
+            _scheduler_heartbeat,
+            trigger="interval",
+            seconds=10,
+            id="runtime-heartbeat-scheduler",
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+
+        def _process_monitor():
+            try:
+                counts = _rp.run_monitor_pass(DATABASE_PATH)
+                if counts["hanging"] or counts["dead"]:
+                    self.log.warning(
+                        "process-monitor: alive=%d hanging=%d dead=%d",
+                        counts["alive"], counts["hanging"], counts["dead"],
+                    )
+            except Exception:
+                self.log.exception("process-monitor falló")
+
+        self._scheduler.add_job(
+            _process_monitor,
+            trigger="interval",
+            seconds=30,
+            id="process-monitor",
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+
         self._install_signal_handlers()
 
         self._scheduler.start()
@@ -294,6 +381,14 @@ class BotRuntime:
                 self._file_manager.stop()
             except Exception:
                 self.log.exception("error apagando file_manager")
+        # U-02: marcar el proceso scheduler como dead graceful
+        try:
+            from config.settings import DATABASE_PATH
+            from src.utils import runtime_processes as _rp
+            _rp.mark_stopped(DATABASE_PATH, process_name="scheduler",
+                             reason="graceful")
+        except Exception:
+            self.log.exception("runtime_processes: mark_stopped falló")
         self.log.info("catastro-bot DETENIDO")
 
 
