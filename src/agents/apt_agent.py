@@ -30,6 +30,15 @@ import time
 from pathlib import Path
 from typing import Optional
 
+# HOTFIX 2026-05-22: helpers para reusar pestañas y evitar spam de about:blank.
+# Ver src/utils/browser_session.py.
+from src.utils.browser_session import (
+    DEFAULT_APT_PATTERNS,
+    cleanup_blank_tabs,
+    get_or_create_apt_page,
+    is_page_alive,
+)
+
 # Lock global que impide dos contextos Playwright usando el mismo perfil Chrome
 # simultáneamente (Chromium mata al segundo proceso si el perfil está bloqueado).
 _PROFILE_LOCK = threading.Lock()
@@ -429,7 +438,15 @@ class APTAgent(BaseAgent):
                     slow_mo=self._slow_mo,
                 )
                 try:
-                    page = ctx.new_page()
+                    # HOTFIX 2026-05-22: limpiar tabs blank residuales antes
+                    # de empezar (perfil persistente puede traer tabs vacías
+                    # del run anterior).
+                    with contextlib.suppress(Exception):
+                        cleanup_blank_tabs(ctx, max_blank=0)
+                    # Reusar pestaña APT existente del perfil si la hay, sino
+                    # abrir UNA. Antes esto siempre abría una nueva además de
+                    # las que ya tenía el contexto.
+                    page = get_or_create_apt_page(ctx)
                     try:
                         yield page
                     finally:
@@ -544,9 +561,20 @@ class APTAgent(BaseAgent):
                             )
                         return
 
-                # 2. No hay tab APT logueado — abrir una nueva en SSO
-                self._log.info("CDP: abriendo tab SSO para login con Firma Digital")
-                page = ctx.new_page()
+                # HOTFIX 2026-05-22: limpiar tabs blank huérfanas antes de
+                # abrir el SSO (evita acumulación cada vez que se invoca
+                # APT SESION repetidas veces).
+                with contextlib.suppress(Exception):
+                    cleanup_blank_tabs(browser, max_blank=0)
+
+                # 2. No hay tab APT logueado — buscar pestaña SSO existente
+                # antes de crear una. Antes esto SIEMPRE abría una nueva tab,
+                # aún si ya había una pestaña sso.cfia.or.cr abierta de un
+                # intento anterior.
+                page = get_or_create_apt_page(
+                    browser, url_patterns=("sso.cfia.or.cr", "apt.cfia.or.cr"),
+                )
+                self._log.info("CDP: usando tab SSO (url=%s)", page.url[:80] if is_page_alive(page) else "?")
                 page.goto(self._login_url, wait_until="load", timeout=60000)
                 if notificar_fn:
                     notificar_fn(
@@ -680,7 +708,10 @@ class APTAgent(BaseAgent):
                     headless=False,
                     slow_mo=50,
                 )
-                page = ctx.new_page()
+                # HOTFIX 2026-05-22: limpiar blank tabs + reusar APT/SSO si existe.
+                with contextlib.suppress(Exception):
+                    cleanup_blank_tabs(ctx, max_blank=0)
+                page = get_or_create_apt_page(ctx)
                 try:
                     # ── Verificar si el perfil ya tiene sesión APT activa ─────────
                     # Navegar a APT Home: si NO hay redirect al SSO → sesión válida.
@@ -828,7 +859,10 @@ class APTAgent(BaseAgent):
                 headless=False,
                 slow_mo=300,
             )
-            page = ctx.new_page()
+            # HOTFIX 2026-05-22: reusar pestaña abierta en lugar de nueva.
+            with contextlib.suppress(Exception):
+                cleanup_blank_tabs(ctx, max_blank=0)
+            page = get_or_create_apt_page(ctx)
             try:
                 page.goto(destino, wait_until="load", timeout=60000)
                 # Mantener abierto hasta que el usuario cierre
@@ -890,24 +924,13 @@ class APTAgent(BaseAgent):
                         raise AgentError(
                             "Chrome conectado sin contextos. Ejecute APT SESION primero."
                         )
-                    # Buscar pestaña APT existente (revisa todos los contextos)
-                    page = None
-                    target_ctx = None
-                    for c in browser.contexts:
-                        for pg in c.pages:
-                            try:
-                                if "apt.cfia.or.cr" in pg.url:
-                                    page = pg
-                                    target_ctx = c
-                                    break
-                            except Exception:
-                                continue
-                        if page:
-                            break
-                    # Si no hay pestaña APT, abrir una en el primer contexto
-                    if page is None:
-                        target_ctx = browser.contexts[0]
-                        page = target_ctx.new_page()
+                    # HOTFIX 2026-05-22: usar helper que reusa pestaña APT/SSO
+                    # viva si existe y solo abre nueva si no hay candidata.
+                    # También limpia blanks acumulados ANTES.
+                    with contextlib.suppress(Exception):
+                        cleanup_blank_tabs(browser, max_blank=1)
+                    page = get_or_create_apt_page(browser)
+                    # target_ctx ya no se usa más abajo (era para new_page)
 
                     self._crear_contrato_body(
                         page, exp, tipo_plano, topografo, numero,

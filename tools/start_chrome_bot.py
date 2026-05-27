@@ -107,7 +107,15 @@ def launch_chrome(chrome_exe: str, profile_dir: Path) -> subprocess.Popen:
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-features=ProfilePicker,UserDataSnapshot",
-        "--new-window",
+        # HOTFIX 2026-05-22: flags para evitar ventanas de control extra.
+        # --no-startup-window suprime la ventana inicial cuando Chrome ya
+        # tenía pestañas en el perfil (sino abre una en blanco además).
+        # --disable-session-crashed-bubble evita el popup "Restaurar"
+        # cuando el proceso anterior fue forzado.
+        "--disable-session-crashed-bubble",
+        "--disable-infobars",
+        # Antes había --new-window acá: forzaba siempre ventana adicional
+        # aunque Chrome ya tuviera el perfil abierto. Removido.
         APT_HOME,
     ]
     print(f"  Comando: {chrome_exe} --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --user-data-dir={profile_dir} ...")
@@ -131,12 +139,32 @@ def wait_cdp(timeout: int = 20) -> bool:
     return False
 
 
+def _cdp_ya_responde() -> bool:
+    """¿El puerto 9222 ya tiene Chrome respondiendo? Si sí, no hay que
+    relanzar nada. Idempotente — evita el spam si el operador clickea
+    'Encender Chrome' varias veces seguidas desde el dashboard."""
+    try:
+        with urllib.request.urlopen(CDP_URL, timeout=1) as r:
+            return r.status == 200
+    except (urllib.error.URLError, ConnectionError, TimeoutError):
+        return False
+
+
 def main() -> int:
     no_kill = "--no-kill" in sys.argv
+    force = "--force" in sys.argv  # ignora chequeo idempotente
 
     print("═" * 60)
     print("  catastro-bot — launcher Chrome con CDP")
     print("═" * 60)
+
+    # HOTFIX 2026-05-22: idempotencia. Si Chrome del bot ya responde en
+    # CDP, no relanzamos nada — evita acumulación de ventanas cuando el
+    # operador clickea "Encender Chrome" varias veces seguidas.
+    if not force and _cdp_ya_responde():
+        print("\n[OK] Chrome del bot ya está vivo en CDP 9222.")
+        print("    No se relanza nada (--force para forzar relanzo).")
+        return 0
 
     chrome = find_chrome()
     if not chrome:
