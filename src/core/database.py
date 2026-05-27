@@ -281,6 +281,25 @@ INSERT OR IGNORE INTO api_budget (id, monthly_usd, alert_threshold)
 -- intenta restaurar; si recibe OK, marca 'up' de nuevo.
 --
 -- Plan: PLAN_MEJORAS Sprint 4 / N-03.
+-- ── Historial de alertas (Sprint 2 / O-05) ───────────────────────────────────
+-- Una fila por (expediente, tipo_alerta). Usada por _stale_alert y futuros
+-- jobs de alertas para implementar "novelty check": no spammear si la
+-- última alerta fue reciente o si el snapshot de estado no cambió.
+--
+-- Sin esta tabla, un expediente bloqueado 48h dispara 8 alertas
+-- (1 cada 6h en la corrida de stale-alert). Con novelty check, recibe ≤2.
+--
+-- Plan: PLAN_MEJORAS Sprint 2 / O-05.
+CREATE TABLE IF NOT EXISTS alert_history (
+    expediente_id        TEXT NOT NULL,
+    alert_type           TEXT NOT NULL,           -- 'stale_48h', 'apt_correcciones', ...
+    last_sent_at         TEXT NOT NULL,           -- ISO UTC
+    last_state_snapshot  TEXT,                    -- hash o JSON corto que identifique el estado
+    PRIMARY KEY (expediente_id, alert_type)
+);
+CREATE INDEX IF NOT EXISTS idx_alert_history_type
+    ON alert_history(alert_type, last_sent_at);
+
 CREATE TABLE IF NOT EXISTS external_services_health (
     service_name        TEXT PRIMARY KEY,        -- 'green_api', 'anthropic', 'drive', ...
     status              TEXT NOT NULL DEFAULT 'up',  -- 'up' | 'down' | 'degraded'
@@ -1651,3 +1670,63 @@ class Database:
                 (accion,),
             ).fetchone()
             return dict(row) if row else None
+
+    # ─── alert_history (Sprint 2 / O-05) ──────────────────────────────
+
+    def alert_history_get(
+        self, expediente_id: str, alert_type: str
+    ) -> Optional[dict]:
+        """Lee la última alerta enviada para (expediente, tipo).
+
+        Devuelve dict con `last_sent_at` y `last_state_snapshot`, o None
+        si nunca se ha alertado.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM alert_history "
+                "WHERE expediente_id = ? AND alert_type = ?",
+                (expediente_id, alert_type),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def alert_history_upsert(
+        self,
+        expediente_id: str,
+        alert_type: str,
+        *,
+        snapshot: Optional[str] = None,
+        sent_at: Optional[str] = None,
+    ) -> None:
+        """Inserta o actualiza la entrada para (expediente, tipo).
+
+        `snapshot` es un string corto (hash o JSON serializado) que
+        captura el estado relevante en el momento de alertar. Si en la
+        próxima corrida el snapshot no cambió Y han pasado <24h, no se
+        re-alerta.
+        """
+        sent_at = sent_at or _now_iso()
+        with self._transaction() as conn:
+            conn.execute(
+                """INSERT INTO alert_history
+                       (expediente_id, alert_type, last_sent_at, last_state_snapshot)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(expediente_id, alert_type) DO UPDATE SET
+                       last_sent_at = excluded.last_sent_at,
+                       last_state_snapshot = excluded.last_state_snapshot
+                """,
+                (expediente_id, alert_type, sent_at, snapshot),
+            )
+
+    def alert_history_listar(
+        self, alert_type: Optional[str] = None, limit: int = 200
+    ) -> list[dict]:
+        """Lista entradas de alert_history (debug / dashboard)."""
+        sql = "SELECT * FROM alert_history"
+        args: list[Any] = []
+        if alert_type:
+            sql += " WHERE alert_type = ?"
+            args.append(alert_type)
+        sql += " ORDER BY last_sent_at DESC LIMIT ?"
+        args.append(limit)
+        with self.connect() as conn:
+            return [dict(r) for r in conn.execute(sql, args).fetchall()]

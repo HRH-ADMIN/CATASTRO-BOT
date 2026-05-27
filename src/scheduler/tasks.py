@@ -183,10 +183,74 @@ def _backup_db(orchestrator: "Orchestrator") -> None:
         _log.exception("backup completo falló")
 
 
+_STALE_ALERT_TYPE = "stale_48h"
+_STALE_ALERT_COOLDOWN_HOURS = 24
+
+
+def _stale_snapshot(exp: dict) -> str:
+    """Snapshot conciso del estado relevante para detectar novedad.
+
+    Cambios en cualquiera de estos campos = re-alertar:
+      - estado_actual (cambió de etapa)
+      - tipo_plano (raro pero posible)
+      - fecha_actualizacion (hubo actividad nueva)
+
+    Si los tres son iguales, el expediente sigue exactamente bloqueado
+    en lo mismo → no spamear de nuevo.
+    """
+    parts = [
+        str(exp.get("estado_actual", "")),
+        str(exp.get("tipo_plano", "")),
+        str(exp.get("fecha_actualizacion", "")),
+    ]
+    return "|".join(parts)
+
+
+def _filtrar_stale_por_novedad(stale: list[dict], db) -> list[dict]:
+    """Aplica novelty check a la lista de expedientes stale.
+
+    Excluye los que:
+      - fueron alertados en las últimas 24h, Y
+      - cuyo snapshot de estado no cambió desde la última alerta.
+
+    Sprint 2 / O-05.
+    """
+    from datetime import datetime, timedelta, timezone
+    ahora_utc = datetime.now(timezone.utc)
+    nuevos: list[dict] = []
+    for exp in stale:
+        eid = exp.get("id")
+        if not eid:
+            continue
+        snapshot = _stale_snapshot(exp)
+        prev = db.alert_history_get(eid, _STALE_ALERT_TYPE)
+        if prev:
+            # Parsear last_sent_at (puede tener o no tz)
+            try:
+                ts = datetime.fromisoformat(prev["last_sent_at"])
+                if ts.tzinfo is None:
+                    # Asumir UTC si no tiene tz (compat con writes antiguos)
+                    ts = ts.replace(tzinfo=timezone.utc)
+                diff = ahora_utc - ts
+            except Exception:
+                diff = timedelta(days=999)  # forzar re-alerta si parseo falla
+            if diff < timedelta(hours=_STALE_ALERT_COOLDOWN_HOURS):
+                if prev.get("last_state_snapshot") == snapshot:
+                    # Misma situación, alertado hace poco — skip
+                    continue
+        nuevos.append(exp)
+    return nuevos
+
+
 def _stale_alert(orchestrator: "Orchestrator") -> None:
     """Detecta expedientes activos sin actividad > 48h y alerta al admin.
 
     El mensaje llega por WhatsApp al primer número con rol 'admin' en BD.
+
+    Sprint 2 / O-05: **novelty check**. Solo alerta sobre expedientes
+    que (a) nunca fueron alertados, o (b) el último alert fue >24h Y
+    cambió el estado relevante. Esto reduce spam de 8 alertas/2 días
+    a típicamente 2 (una inicial + una si pasa otro ciclo de 24h).
     """
     try:
         stale = orchestrator.db.expedientes_stale(horas=48)
@@ -194,16 +258,32 @@ def _stale_alert(orchestrator: "Orchestrator") -> None:
             _log.debug("stale-alert: sin expedientes bloqueados")
             return
 
-        lineas = [f"⚠️ *{len(stale)} expediente(s) sin actividad >48h*\n"]
-        for exp in stale[:10]:   # máximo 10 en el mensaje
+        # Novelty filter — corazón de O-05.
+        nuevos = _filtrar_stale_por_novedad(stale, orchestrator.db)
+        if not nuevos:
+            _log.info(
+                "stale-alert: %d bloqueados pero todos alertados <24h "
+                "sin cambios — skip", len(stale)
+            )
+            return
+
+        lineas = [
+            f"⚠️ *{len(nuevos)} expediente(s) sin actividad >48h "
+            f"(con cambios o nuevos)*\n"
+        ]
+        for exp in nuevos[:10]:   # máximo 10 en el mensaje
             horas_sin_actividad = _horas_desde(exp.get("fecha_actualizacion", ""))
             lineas.append(
                 f"  • *{display_proyecto(exp)}* "
                 f"({exp['tipo_plano']}) — {exp['estado_actual']} "
                 f"— {horas_sin_actividad}h sin cambios"
             )
-        if len(stale) > 10:
-            lineas.append(f"  … y {len(stale) - 10} más")
+        if len(nuevos) > 10:
+            lineas.append(f"  … y {len(nuevos) - 10} más")
+        if len(stale) > len(nuevos):
+            suprimidos = len(stale) - len(nuevos)
+            lineas.append(f"\n(_{suprimidos} más bloqueados pero ya "
+                          f"alertados sin cambios_)")
 
         mensaje = "\n".join(lineas)
 
@@ -212,13 +292,28 @@ def _stale_alert(orchestrator: "Orchestrator") -> None:
         if not admins:
             _log.warning("stale-alert: no hay admins registrados para notificar")
             return
+        enviado = False
         for admin in admins:
             try:
                 orchestrator.whatsapp.enviar_mensaje(admin["telefono"], mensaje)
-                _log.info("stale-alert enviado a %s (%d exp)", admin["telefono"], len(stale))
+                _log.info("stale-alert enviado a %s (%d exp nuevos / %d totales)",
+                          admin["telefono"], len(nuevos), len(stale))
+                enviado = True
                 break
             except Exception:
                 _log.exception("no se pudo notificar admin %s", admin["telefono"])
+
+        if enviado:
+            # Upsert alert_history SOLO para los que efectivamente alertamos
+            for exp in nuevos:
+                try:
+                    orchestrator.db.alert_history_upsert(
+                        exp["id"], _STALE_ALERT_TYPE,
+                        snapshot=_stale_snapshot(exp),
+                    )
+                except Exception:
+                    _log.exception("alert_history_upsert falló para %s",
+                                   exp.get("id"))
 
     except Exception:
         _log.exception("stale-alert falló")
