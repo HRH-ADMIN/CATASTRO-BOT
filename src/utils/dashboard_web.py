@@ -1069,6 +1069,19 @@ def _render_html(refresh_sec: int = 30) -> str:
     <title>Catastro Bot — Dashboard</title>
     <style>{_CSS}</style>
     <style>
+    /* Banner externo (N-03) — visible solo si algún servicio externo está down */
+    #ext-services-banner {{
+        display: none; padding: 10px 20px; margin: 0;
+        background: rgba(245, 158, 11, 0.12);
+        border-bottom: 1px solid rgba(245, 158, 11, 0.4);
+        color: #fbbf24; font-size: 13px;
+        text-align: center;
+    }}
+    #ext-services-banner.show {{ display: block; }}
+    #ext-services-banner strong {{ color: #f1f5f9; }}
+    #ext-services-banner a {{
+        color: #60a5fa; text-decoration: none; margin-left: 12px;
+    }}
     /* Indicador de sincronización live (U-04 paso 6) */
     #live-status {{
         display: inline-flex; align-items: center; gap: 6px;
@@ -1101,6 +1114,9 @@ def _render_html(refresh_sec: int = 30) -> str:
     </style>
 </head>
 <body>
+    <div id="ext-services-banner">
+        <!-- Inyectado por JS si algún servicio externo está down -->
+    </div>
     <header>
         <h1>📐 Catastro Bot — Dashboard</h1>
         <div class="meta">
@@ -1142,6 +1158,52 @@ def _render_html(refresh_sec: int = 30) -> str:
     </footer>
 
     <script>
+    // ─── Banner de servicios externos (N-03) ───────────────────────────
+    (function () {{
+        var bannerEl = document.getElementById("ext-services-banner");
+        if (!bannerEl) return;
+
+        var FRIENDLY_NAMES = {{
+            "green_api": "WhatsApp (Green API)",
+            "anthropic": "IA Vision (Anthropic)",
+            "drive": "Backup Drive",
+            "rnp": "RNP digital"
+        }};
+        var ACTIONS = {{
+            "green_api": '<a href="https://console.green-api.com/" target="_blank">Re-autorizar instancia</a>'
+        }};
+
+        function loadStatus() {{
+            fetch("/api/external-services")
+                .then(function (r) {{ return r.json(); }})
+                .then(function (data) {{
+                    var down = (data.services || []).filter(function (s) {{
+                        return s.status === "down" || s.status === "degraded";
+                    }});
+                    if (!down.length) {{
+                        bannerEl.classList.remove("show");
+                        bannerEl.innerHTML = "";
+                        return;
+                    }}
+                    var parts = down.map(function (s) {{
+                        var name = FRIENDLY_NAMES[s.service_name] || s.service_name;
+                        var info = "<strong>" + name + "</strong> caído";
+                        if (s.last_error_code) info += " (" + s.last_error_code + ")";
+                        if (ACTIONS[s.service_name]) info += " · " + ACTIONS[s.service_name];
+                        return info;
+                    }});
+                    bannerEl.innerHTML = "⚠️ Servicios externos: " + parts.join(" &nbsp;·&nbsp; ") +
+                        ' · El bot está usando fallbacks (ver <a href="/config/runtime">/config/runtime</a>)';
+                    bannerEl.classList.add("show");
+                }})
+                .catch(function () {{ /* ignore */ }});
+        }}
+
+        loadStatus();
+        setInterval(loadStatus, 30000);  // refresh polling cada 30s
+        window._extServicesReload = loadStatus;  // expose para SSE
+    }})();
+
     // ─── SSE client (U-04 paso 6) ──────────────────────────────────────
     // Conecta a /api/events/stream y reacciona a:
     //   - 'hello' / 'heartbeat'    → mantener UI en 'ok'.
@@ -1209,6 +1271,9 @@ def _render_html(refresh_sec: int = 30) -> str:
                     scheduleReload();
                 }} else if (data.type === "control_state_changed") {{
                     scheduleReload();
+                }} else if (data.type === "external_service_changed") {{
+                    // N-03: refresca el banner sin recargar la página
+                    if (window._extServicesReload) window._extServicesReload();
                 }}
                 // 'hello' y 'heartbeat' solo refrescan lastEventTs (ya hecho arriba).
             }} catch (err) {{

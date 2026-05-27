@@ -492,3 +492,108 @@ cada vez que el bot arrancó.
    `start_chrome_bot.py` y `healthcheck.py`.
 
 ---
+
+## N-03 — Fallback de Green API HTTP 466
+
+**Sprint:** 4
+**Fecha de implementación:** 2026-05-22
+**Branch:** `sprint-4/n-03-greenapi-fallback`
+
+### Por qué este cambio existe
+
+Desde la sesión anterior (2026-05-21) Green API responde HTTP 466 al
+intentar enviar mensajes. Causas habituales: instancia desautorizada
+(QR caducó), quota mensual agotada, o instancia eliminada. Hasta ahora
+el bot fallaba silenciosamente y los mensajes al cliente NO se
+entregaban — sin notificar al operador.
+
+N-03 resuelve:
+- **Detecta** HTTP 466 explícitamente y marca el servicio como down.
+- **Envía email fallback** al operador con el mensaje pendiente.
+- **Banner visible** en el dashboard mientras Green API está down.
+- **Auto-recovery** cada 30 min sin intervención.
+
+### Procedimiento
+
+1. **Verificar el estado actual:**
+   ```powershell
+   curl http://localhost:9224/api/external-services
+   ```
+
+2. **Forzar el escenario down** (sin esperar a que Green API falle de verdad):
+   ```powershell
+   .venv\Scripts\python.exe -c "
+   from src.utils import external_services as es
+   from pathlib import Path
+   es.mark_down(Path('data/catastro.db'), 'green_api',
+                error_code='466', error_message='test manual')
+   print('green_api marcado como down')
+   "
+   ```
+
+3. **Verificar el banner en el dashboard:**
+   - Abrir `http://localhost:9224/`
+   - Justo debajo del header debe aparecer un **banner amarillo**:
+     "⚠️ Servicios externos: WhatsApp (Green API) caído (466) · Re-autorizar instancia · El bot está usando fallbacks"
+   - El link abre `https://console.green-api.com/` en otra pestaña.
+
+4. **Probar el fallback de email:**
+   ```powershell
+   .venv\Scripts\python.exe -c "
+   from src.core.credential_manager import CredentialManager
+   from src.core.database import Database
+   from src.agents.whatsapp_agent import WhatsAppAgent
+   creds = CredentialManager()
+   db = Database(credentials=creds)
+   agent = WhatsAppAgent(db, creds)
+   # Esto irá por email, no por WhatsApp
+   result = agent.enviar_mensaje('+50688887310', 'Test N-03', contexto='manual_test')
+   print('Resultado:', result)
+   "
+   ```
+   - `result` debe empezar con `email:` (ID sintético).
+   - Verificar en `topografiahrh@gmail.com` el email con subject
+     `[catastro-bot] WhatsApp caído — mensaje pendiente (manual_test)`.
+
+5. **Restauración manual:**
+   ```powershell
+   curl -X POST http://localhost:9224/api/external-services/green_api/mark-up
+   ```
+   - El banner desaparece automáticamente (SSE).
+   - El próximo `enviar_mensaje` vuelve a ir por WhatsApp.
+
+6. **Auto-recovery del scheduler:**
+   - El job `greenapi-recovery` corre cada 30 min.
+   - Si Green API está down, intenta `getStateInstance`. Si responde
+     `authorized`, marca el servicio como up automáticamente.
+
+### Criterios de aceptación
+
+- [x] Capturar HTTP 466 sin retry (no es transitorio) y marcar el
+      servicio como `down` con audit log entry.
+- [x] Enviar email al operador con el mensaje pendiente.
+- [x] Banner amarillo persistente con link a la consola de Green API.
+- [x] Auto-recovery cada 30 min vía `getStateInstance`.
+- [x] Botón manual de restauración (`POST /api/external-services/green_api/mark-up`).
+- [x] Tests: **19 nuevos** (10 external_services + 9 fallback agent).
+
+### Tests automatizados relacionados
+
+| Archivo | Tests | Cubre |
+|---|---|---|
+| `test_external_services.py` | 10 | Schema, mark_down/up, dedup eventos, is_down |
+| `test_whatsapp_466_fallback.py` | 9 | Detección 466, persistencia, fallback email, recovery |
+
+### Limitaciones conocidas
+
+1. **El email fallback va al operador, no al cliente.** Si el cliente
+   espera el mensaje WhatsApp, no lo va a recibir hasta que el operador
+   lo reenvíe manualmente o Green API se restaure. Es intencional:
+   no hay email confirmable del cliente para todos los casos.
+2. **`enviar_archivo` no tiene fallback todavía.** Próxima iteración:
+   email con adjunto si pesa <25MB.
+3. **`solicitar_confirmacion` mientras Green API down**: el bot crea la
+   acción pendiente en BD pero NO recibe respuesta. `stale-alert` previene
+   el olvido. El flujo se reanuda cuando se restaura el canal.
+
+---
