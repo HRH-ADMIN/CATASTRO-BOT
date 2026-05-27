@@ -158,6 +158,86 @@ BEGIN
     SELECT RAISE(FAIL, 'audit_log entries are immutable');
 END;
 
+-- ── Vista normalizada para el dashboard ──────────────────────────────────────
+-- v_expedientes_dashboard: SSOT calculado para la UI.
+--
+--   Expone solo las keys de metadata_json necesarias (no el JSON completo —
+--   defensa contra PII en endpoints) + columna `divergencia` que detecta
+--   cuando estado_actual del bot quedó atrás respecto a apt_estado/muni_estado.
+--
+-- Plan: PLAN_MEJORAS Sprint 1 / U-04 paso 4.
+-- Documentación canónica del schema: docs/SCHEMA.md §5.
+DROP VIEW IF EXISTS v_expedientes_dashboard;
+CREATE VIEW v_expedientes_dashboard AS
+SELECT
+    e.id,
+    e.numero_expediente,
+    e.tipo_plano,
+    e.estado_actual,
+    e.fecha_creacion,
+    e.fecha_actualizacion,
+    e.completado,
+    e.cancelado,
+    json_extract(e.metadata_json, '$.apt_estado')             AS apt_estado,
+    json_extract(e.metadata_json, '$.apt_estado_sync')        AS apt_estado_sync,
+    json_extract(e.metadata_json, '$.apt_tramite')            AS apt_tramite,
+    json_extract(e.metadata_json, '$.apt_numero')             AS apt_numero,
+    json_extract(e.metadata_json, '$.apt_fecha_presentacion') AS apt_fecha_presentacion,
+    json_extract(e.metadata_json, '$.muni_estado')            AS muni_estado,
+    json_extract(e.metadata_json, '$.muni_monto_pendiente')   AS muni_monto_pendiente,
+    json_extract(e.metadata_json, '$.nombre_proyecto')        AS nombre_proyecto,
+    json_extract(e.metadata_json, '$.provincia')              AS provincia,
+    json_extract(e.metadata_json, '$.canton')                 AS canton,
+    json_extract(e.metadata_json, '$.distrito')               AS distrito,
+    (SELECT COUNT(*) FROM estados_historial h
+      WHERE h.expediente_id = e.id)                            AS n_transiciones,
+    (SELECT MAX(timestamp) FROM estados_historial h
+      WHERE h.expediente_id = e.id)                            AS ultimo_evento_ts,
+    -- Detección de divergencia bot vs sistema externo
+    CASE
+        WHEN e.estado_actual IN ('presentado_apt_r1','enviado_cfia')
+             AND json_extract(e.metadata_json, '$.apt_estado') LIKE '%Defectuoso%'
+            THEN 'apt:defectuoso'
+        WHEN e.estado_actual IN ('presentado_apt_r1','enviado_cfia')
+             AND json_extract(e.metadata_json, '$.apt_estado') LIKE '%Inscrito%'
+            THEN 'apt:inscrito'
+        WHEN e.estado_actual IN ('enviado_muni','formulario_muni_enviado')
+             AND json_extract(e.metadata_json, '$.muni_estado') IN
+                 ('aprobado','rechazado','morosidad')
+            THEN 'muni:' || json_extract(e.metadata_json, '$.muni_estado')
+        ELSE NULL
+    END AS divergencia
+FROM expedientes e;
+
+-- ── Invariante: fecha_actualizacion siempre refleja la última mutación ────────
+-- Garantiza que cualquier UPDATE sobre columnas significativas de `expedientes`
+-- deje `fecha_actualizacion` apuntando a "ahora", incluso si el caller olvidó
+-- setearla en el SET.
+--
+-- Diseño:
+--   - Trigger AFTER UPDATE OF <cols>: solo se dispara si una de esas columnas
+--     cambió explícitamente (no se dispara en UPDATEs que solo tocan
+--     fecha_actualizacion, evitando recursión).
+--   - WHEN NEW.fecha_actualizacion = OLD.fecha_actualizacion: solo actúa si
+--     el caller NO seteó la fecha (camino "olvido"). Si el caller la setea
+--     explícitamente, respeta su valor.
+--   - PRAGMA recursive_triggers (OFF por default en SQLite) previene loops.
+--
+-- Plan: PLAN_MEJORAS_catastro-bot_3.md Sprint 1 / U-04 paso 3.
+-- Documentado en docs/SCHEMA.md §3.
+CREATE TRIGGER IF NOT EXISTS expedientes_touch_fecha_actualizacion
+AFTER UPDATE OF estado_actual, metadata_json, completado, cancelado,
+                nombre_topografo, cedula_topografo, telefono_cliente,
+                nombre_cliente, municipalidad
+ON expedientes
+FOR EACH ROW
+WHEN NEW.fecha_actualizacion = OLD.fecha_actualizacion
+BEGIN
+    UPDATE expedientes
+       SET fecha_actualizacion = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE id = NEW.id;
+END;
+
 -- ── Usuarios y roles ──────────────────────────────────────────────────────────
 -- Roles: admin (todo), topografo (crear+aprobar propios), asistente (crear+ver)
 CREATE TABLE IF NOT EXISTS usuarios (
@@ -488,14 +568,17 @@ class Database:
         if nuevo_estado not in Estado.values():
             raise DatabaseError(f"estado inválido: {nuevo_estado!r}")
         now = _now_iso()
+        numero_expediente: Optional[str] = None
         with self._transaction() as conn:
             row = conn.execute(
-                "SELECT estado_actual FROM expedientes WHERE id = ?",
+                "SELECT estado_actual, numero_expediente "
+                "  FROM expedientes WHERE id = ?",
                 (expediente_id,),
             ).fetchone()
             if not row:
                 raise DatabaseError(f"expediente {expediente_id!r} no encontrado")
             estado_anterior = row["estado_actual"]
+            numero_expediente = row["numero_expediente"]
             if estado_anterior == nuevo_estado:
                 return
             conn.execute(
@@ -521,6 +604,21 @@ class Database:
                 accion="expediente.cambiar_estado",
                 detalles={"de": estado_anterior, "a": nuevo_estado, "detalles": detalles},
             )
+        # Publisher SSE — fuera de la transacción, así los subscribers que
+        # re-consulten la BD ven el estado ya commiteado. Import diferido
+        # para evitar dependencia circular y para que tests puedan resetear.
+        try:
+            from src.utils.event_bus import publish_expediente_updated
+            publish_expediente_updated(
+                expediente_id=expediente_id,
+                numero_expediente=numero_expediente or "",
+                estado_actual=nuevo_estado,
+                actor=actor,
+                accion="cambiar_estado",
+            )
+        except Exception:
+            # Eventos son best-effort; nunca propagar al caller.
+            pass
 
     def historial_estados(self, expediente_id: str) -> list[dict]:
         with self.connect() as conn:
@@ -660,13 +758,18 @@ class Database:
         Campos existentes no mencionados en `nuevos_campos` se preservan.
         Util para guardar valores como apt_tramite, numero_muni, etc.
         """
+        numero_expediente: Optional[str] = None
+        estado_actual: Optional[str] = None
         with self._transaction() as conn:
             row = conn.execute(
-                "SELECT metadata_json FROM expedientes WHERE id = ?",
+                "SELECT metadata_json, numero_expediente, estado_actual "
+                "  FROM expedientes WHERE id = ?",
                 (expediente_id,),
             ).fetchone()
             if not row:
                 raise DatabaseError(f"expediente {expediente_id!r} no encontrado")
+            numero_expediente = row["numero_expediente"]
+            estado_actual = row["estado_actual"]
             meta = json.loads(row["metadata_json"] or "{}")
             meta.update(nuevos_campos)
             conn.execute(
@@ -678,6 +781,18 @@ class Database:
                 accion="expediente.actualizar_metadata",
                 detalles={"campos": list(nuevos_campos.keys())},
             )
+        # Publisher SSE — best-effort, fuera de la transacción.
+        try:
+            from src.utils.event_bus import publish_expediente_updated
+            publish_expediente_updated(
+                expediente_id=expediente_id,
+                numero_expediente=numero_expediente or "",
+                estado_actual=estado_actual or "",
+                actor=actor,
+                accion="actualizar_metadata",
+            )
+        except Exception:
+            pass
 
     def buscar_por_mega_path(self, mega_path: str) -> Optional[dict]:
         """Busca un expediente cuyo metadata_json["mega_path"] sea el dado.

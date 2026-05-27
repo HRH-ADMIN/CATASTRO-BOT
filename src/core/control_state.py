@@ -205,6 +205,17 @@ class ControlStateManager:
                 "control_state actualizado por %s (%s) — enabled=%s",
                 set_by, state.reason, state.enabled,
             )
+            # Publisher SSE — best-effort (U-04 paso 5).
+            try:
+                from src.utils.event_bus import publish_control_state_changed
+                publish_control_state_changed(
+                    enabled=state.enabled,
+                    modules=state.modules,
+                    reason=state.reason,
+                    set_by=state.set_by,
+                )
+            except Exception:
+                pass
             return state
 
     def _write_to_disk(self, state: ControlState) -> None:

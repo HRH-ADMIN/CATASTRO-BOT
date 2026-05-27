@@ -29,10 +29,13 @@ import logging
 import threading
 from typing import Optional
 
-from flask import Flask, jsonify, redirect, request
+import json as _json
+
+from flask import Flask, Response, jsonify, redirect, request
 
 from src.core.control_state import KNOWN_MODULES, get_manager as get_control_manager
 from src.core.credential_manager import CredentialManager
+from src.utils.event_bus import get_bus as _get_event_bus
 from src.utils.webhook_security import verify_bearer_token
 
 log = logging.getLogger("catastro.web")
@@ -182,6 +185,37 @@ def create_app() -> Flask:
             reason="manual resume via /api/resume",
         )
         return jsonify(new_state.to_dict())
+
+    # ─────────────────────── Server-Sent Events ─────────────────────────
+    # Stream de eventos para push en tiempo real al dashboard (U-04 paso 5).
+    # Sin auth — política consistente con el resto del dashboard
+    # (bind localhost-only). GET-only, así que CSRF no aplica.
+
+    @app.route("/api/events/stream", methods=["GET"])
+    def api_events_stream():
+        bus = _get_event_bus()
+
+        def _generate():
+            # Hint a clientes que reintenten después de 3s si se cae.
+            yield "retry: 3000\n\n"
+            # Evento inicial para confirmar conexión activa.
+            yield f"data: {_json.dumps({'type': 'hello', 'subscribers': bus.num_subscribers() + 1})}\n\n"
+            try:
+                for ev in bus.subscribe():
+                    yield f"data: {_json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
+            except GeneratorExit:
+                # Cliente cerró conexión — salir limpio sin loggear como error.
+                return
+
+        return Response(
+            _generate(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",  # útil si hay nginx adelante
+                "Connection": "keep-alive",
+            },
+        )
 
     # ─────────────────────────── Healthcheck ────────────────────────────
 
