@@ -816,3 +816,133 @@ curl -X POST http://localhost:9224/api/revisiones/<rev_id>/rechazar `
    job APScheduler que las marca como `expirada`.
 
 ---
+
+## N-09 — Bitácora diaria automatizada
+
+**Sprint:** 5
+**Fecha de implementación:** 2026-05-27
+**Branch:** `sprint-5/n-09-bitacora-diaria`
+
+### Qué hace
+
+Genera un resumen diario (markdown + HTML + texto) con todo lo que el bot
+hizo en el día CR: cambios de estado, llamadas Anthropic + costo USD,
+errores/eventos críticos del audit log, revisiones pre-envío (N-02),
+procesos colgados (U-02) y cambios de salud de servicios externos (N-03).
+
+Se ejecuta automáticamente vía scheduler a las **19:00 CR** (01:00 UTC),
+se guarda en `docs/bitacoras/YYYY-MM-DD.md` y se envía por email al
+operador (credenciales `muni-san-ramon`).
+
+También se puede generar ad-hoc desde CLI sin esperar al job.
+
+### Procedimiento
+
+#### 1) Bitácora del día actual (markdown a stdout)
+
+```powershell
+.venv\Scripts\python.exe tools\catastro_bot.py bitacora
+```
+
+Esperado: imprime un markdown con secciones:
+- Resumen del día (totales)
+- Cambios de estado por expediente
+- Costos Anthropic (tabla por modelo/tipo)
+- Audit log — eventos críticos
+- Revisiones pre-envío (N-02)
+- Procesos muertos (U-02)
+- Servicios externos (N-03)
+
+#### 2) Día específico + formato texto plano (WhatsApp-friendly)
+
+```powershell
+.venv\Scripts\python.exe tools\catastro_bot.py bitacora --fecha 2026-05-27 --formato text
+```
+
+#### 3) Generar JSON crudo (para procesamiento externo)
+
+```powershell
+.venv\Scripts\python.exe tools\catastro_bot.py bitacora --formato json
+```
+
+#### 4) Guardar en disco (persistir en `docs/bitacoras/`)
+
+```powershell
+.venv\Scripts\python.exe tools\catastro_bot.py bitacora --guardar
+```
+
+Esperado: crea `docs/bitacoras/<fecha>.md`. Re-ejecutar sobrescribe.
+
+#### 5) Enviar por email manualmente
+
+```powershell
+.venv\Scripts\python.exe tools\catastro_bot.py bitacora --enviar
+```
+
+Esperado: llega un correo a la cuenta `muni-san-ramon` con asunto
+`[catastro-bot] Bitácora — <fecha>` y cuerpo HTML con tablas.
+
+> ⚠️ Verificar primero que las credenciales `muni-san-ramon` existan:
+> `catastro-bot config check muni-san-ramon`. Si no, el `--enviar` falla
+> con código 1 y mensaje en stderr.
+
+#### 6) Endpoint REST `/api/bitacora`
+
+Con el dashboard corriendo:
+
+```powershell
+curl "http://localhost:9224/api/bitacora?fecha=2026-05-27"
+curl "http://localhost:9224/api/bitacora?fecha=2026-05-27&formato=markdown"
+curl "http://localhost:9224/api/bitacoras"   # lista de bitácoras guardadas
+```
+
+#### 7) Verificar el job del scheduler (sin esperar 19:00 CR)
+
+Modificar temporalmente el cron a `minute='*/2'` en
+`src/scheduler/tasks.py:_bitacora_diaria` para que dispare cada 2 min,
+reiniciar `python -m src.main`, esperar la generación, revisar
+`docs/bitacoras/` y la bandeja del email. Revertir el cambio.
+
+Alternativa más limpia: invocar `_bitacora_diaria(orchestrator)`
+directamente desde una shell de Python con el orchestrator vivo.
+
+### Criterios de aceptación
+
+- [x] `catastro-bot bitacora` imprime markdown bien formado.
+- [x] `--guardar` crea archivo en `docs/bitacoras/YYYY-MM-DD.md`.
+- [x] `--enviar` envía email con tablas HTML.
+- [x] `--formato text/json` produce salidas válidas.
+- [x] El job del scheduler está registrado con id `bitacora-diaria`,
+      cron 01:00 UTC, `max_instances=1`, sin gate (corre aunque el bot
+      esté pausado — queremos el reporte igual).
+- [x] El job es idempotente: si el `.md` del día ya existe, no lo
+      regenera (pero sí envía email con el contenido existente).
+- [x] El endpoint `/api/bitacora` devuelve JSON o markdown según query
+      param.
+- [x] Tests: **19 nuevos** (12 daily_log + 6 bitacora_api + 1 CLI).
+
+### Tests automatizados relacionados
+
+| Archivo | Tests | Cubre |
+|---|---|---|
+| `test_daily_log.py` | 12 | Agregador, formateadores md/text/html, fecha CR, listar/guardar/leer |
+| `test_bitacora_api.py` | 6 | Endpoint `/api/bitacora` y `/api/bitacoras` |
+| `test_catastro_bot_cli.py::test_bitacora_registrada` | 1 | Subcomando en router |
+
+### Limitaciones conocidas
+
+1. **Email único destinatario.** Va al mismo usuario configurado en
+   `muni-san-ramon`. Si se quiere enviar a varios destinatarios, hay que
+   extender `enviar_email_smtp` o agregar campo `bitacora_to_emails` en
+   credenciales.
+2. **Job sin gate.** Si el operador pausó el bot durante el día, la
+   bitácora se genera igual (intencionalmente — queremos el reporte de
+   qué pasó). Si no se quiere ese comportamiento, agregar `_gated()` en
+   `_bitacora_diaria`.
+3. **Fecha en TZ Costa Rica.** Hardcoded offset UTC-6 sin DST porque CR
+   no observa horario de verano. Si esto cambiara, ajustar
+   `_fecha_default()`.
+4. **No purga bitácoras viejas.** Se acumulan en `docs/bitacoras/`.
+   Próxima iteración: job que comprime las >90 días.
+
+---
