@@ -37,6 +37,7 @@ def client(tmp_path, monkeypatch):
             app = create_app()
             app.config["TESTING"] = True
             app.config["CSRF_DISABLED"] = True
+            app.config["RATE_LIMIT_DISABLED"] = True
             with app.test_client() as c:
                 c._db_path = db_path
                 yield c

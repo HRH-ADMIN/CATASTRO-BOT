@@ -188,6 +188,7 @@ def client(db_path, monkeypatch):
     app = create_app()
     app.config["TESTING"] = True
     app.config["CSRF_DISABLED"] = True
+    app.config["RATE_LIMIT_DISABLED"] = True
     with patch("src.web.app._expected_token", return_value=None):
         with app.test_client() as c:
             yield c

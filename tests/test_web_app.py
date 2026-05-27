@@ -28,6 +28,7 @@ def client(control_manager):
         app = create_app()
         app.config["TESTING"] = True
         app.config["CSRF_DISABLED"] = True
+        app.config["RATE_LIMIT_DISABLED"] = True
         # No hay token configurado → POSTs son públicos (defensa solo en bind)
         with patch("src.web.app._expected_token", return_value=None):
             with app.test_client() as c:
@@ -83,7 +84,8 @@ def test_auth_blocks_post_when_token_set(control_manager):
     with patch("src.web.app.get_control_manager", return_value=control_manager):
         with patch("src.web.app._expected_token", return_value="secret-xyz"):
             app = create_app()
-            app.config["CSRF_DISABLED"] = True  # testeo auth, no CSRF
+            app.config["CSRF_DISABLED"] = True
+            app.config["RATE_LIMIT_DISABLED"] = True  # testeo auth, no CSRF
             with app.test_client() as c:
                 # Sin Authorization → 401
                 resp = c.post("/api/pause")
