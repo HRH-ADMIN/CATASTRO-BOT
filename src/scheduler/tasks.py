@@ -362,6 +362,73 @@ def _horas_desde(iso_ts: str) -> int:
         return -1
 
 
+# ── Bitácora diaria (Sprint 5 / N-09) ────────────────────────────────────────
+
+def _bitacora_diaria(orchestrator: "Orchestrator") -> None:
+    """Genera la bitácora del día CR, la guarda en docs/bitacoras/ y la
+    envía por email al operador. Idempotente: si el archivo .md ya existe
+    para el día, no la regenera (a menos que se borre manualmente).
+
+    El job está agendado para 19:00 CR (01:00 UTC del día siguiente) —
+    momento típico de cierre de jornada del topógrafo.
+
+    Plan: PLAN_MEJORAS Sprint 5 / N-09.
+    """
+    from pathlib import Path
+    from config.settings import DATABASE_PATH
+    from src.utils import daily_log
+
+    # Resolver ROOT del proyecto
+    try:
+        from src.utils.dashboard_web import ROOT
+        root = Path(ROOT)
+    except Exception:
+        root = Path.cwd()
+
+    fecha = daily_log._fecha_default()
+
+    # Si ya existe, leer y enviar — pero no regenerar el .md (idempotente)
+    md_existente = daily_log.leer_bitacora(root, fecha)
+    if md_existente:
+        _log.info("bitácora-diaria: %s.md ya existe, no se regenera", fecha)
+        contenido_md = md_existente
+        data = None
+    else:
+        try:
+            data = daily_log.recopilar(DATABASE_PATH, fecha)
+            contenido_md = daily_log.formatear_markdown(data)
+            path = daily_log.guardar_bitacora(root, fecha, contenido_md)
+            _log.info("bitácora-diaria: %s guardada (%d bytes)",
+                      path.name, len(contenido_md))
+        except Exception:
+            _log.exception("bitácora-diaria: error generando")
+            return
+
+    # Enviar por email al operador
+    try:
+        from src.utils.email_digest import enviar_email_smtp
+        user, password = orchestrator.credentials.get_muni_san_ramon()
+        # Regenerar HTML para email si tenemos data; sino plano del md
+        if data is not None:
+            html_body = daily_log.formatear_html(data)
+        else:
+            data2 = daily_log.recopilar(DATABASE_PATH, fecha)
+            html_body = daily_log.formatear_html(data2)
+
+        ok = enviar_email_smtp(
+            from_addr=user, password=password, to=user,
+            subject=f"[catastro-bot] Bitácora diaria — {fecha}",
+            body_text=contenido_md,
+            body_html=html_body,
+        )
+        if ok:
+            _log.info("bitácora-diaria: enviada por email a %s", user)
+        else:
+            _log.warning("bitácora-diaria: email no salió")
+    except Exception:
+        _log.exception("bitácora-diaria: error enviando email")
+
+
 # ── Alerta de budget Anthropic (Sprint 4 / O-08 sub-paso D) ────────────────────
 
 def _api_budget_alert(orchestrator: "Orchestrator") -> None:
@@ -836,12 +903,25 @@ def register_jobs(
         replace_existing=True,
     )
 
+    # ── Bitácora diaria (N-09) — 19:00 CR (01:00 UTC del día siguiente) ─
+    # SIN gate: queremos el reporte aunque el bot esté paused durante el día.
+    scheduler.add_job(
+        _bitacora_diaria,
+        trigger="cron",
+        hour=1, minute=0,   # 01:00 UTC = 19:00 CR (UTC-6)
+        args=[orchestrator],
+        id="bitacora-diaria",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+
     gate_mode = "with gate" if control_manager else "no gate (legacy)"
     _log.info(
-        "scheduler: 11 jobs registrados (%s) "
+        "scheduler: 12 jobs registrados (%s) "
         "(tick, audit-verify, db-backup, stale-alert, weekly-report, "
         "correcciones-renotif, apt-sync-estados, muni-sync-emails-arranque, "
         "muni-sync-emails [11:00+14:00 CR L-V], greenapi-recovery, "
-        "api-budget-alert [6h])",
+        "api-budget-alert [6h], bitacora-diaria [19:00 CR])",
         gate_mode,
     )
