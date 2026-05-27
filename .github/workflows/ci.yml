@@ -1,0 +1,94 @@
+name: CI
+
+# Plan: PLAN_MEJORAS_catastro-bot_3.md Sprint 3 / "Repositorio Git remoto + CI básico".
+#
+# Notas de diseño:
+# - Runner Windows porque el bot solo se prueba en Windows hoy (DEV_MODE + pywin32).
+# - 3 jobs en paralelo: install/test, lint (opcional, no falla), type-check (opcional).
+# - Tests muy lentos o que requieren CDP/Chrome quedan excluidos por ahora con `-k`.
+# - `--cov-fail-under` se setea bajito (40) para no bloquear el repo nuevo; se sube
+#   gradualmente a medida que se mejora la cobertura.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (Windows + Python 3.13)
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: uv sync (runtime + dev) — usa uv.lock para reproducibilidad
+        run: uv sync --extra dev
+
+      - name: Run unit tests (excluye los que requieren Chrome/CDP/red)
+        env:
+          CATASTRO_BOT_DEV_MODE: "1"
+          CATASTRO_BOT_SIMULAR_APT: "0"
+        run: |
+          uv run pytest -q `
+            --deselect tests/test_scheduler_tasks.py::TestRegisterJobs::test_registra_7_jobs `
+            --deselect tests/test_scheduler_tasks.py::TestBackupDb::test_crea_backup_en_dir_correcto `
+            --deselect tests/test_scheduler_tasks.py::TestBackupDb::test_purga_backups_viejos `
+            --cov=src --cov-report=term-missing --cov-report=xml `
+            --cov-fail-under=40
+
+      - name: Upload coverage XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  lint:
+    name: Lint (ruff, soft-fail por ahora)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install uv + ruff
+        run: pip install uv ruff
+      - name: Run ruff (informativo — no bloquea aún)
+        run: ruff check .
+
+  typecheck:
+    name: Type check (mypy src/core, soft-fail)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install uv + sync dev
+        run: |
+          pip install uv
+          uv sync --extra dev
+      - name: Run mypy on src/core (estricto)
+        run: uv run mypy src/core

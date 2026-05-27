@@ -79,13 +79,31 @@ Documentarlo en **3 lugares** antes de avanzar:
    - `docs/PROTOCOLO_PRE_VUELO.md` (regla)
    - `docs/BOT_PLAYBOOK.md` (resumen + ejemplo)
 
-## 🚦 Estado actual del bot (2026-05-12)
+## 🚦 Estado actual del bot
 
-- 36 reglas activas en BD
-- 60 tests automatizados pasando (`test_apt_auditor.py` + `test_area_consolidator.py`)
-- 6 funciones reutilizables exportadas
-- 1 trámite real enviado al CFIA (VICTOR #2 / APT 1258460)
-- Próximas verificaciones automáticas vía scheduler `apt-sync-estados` (cada 30 min)
+> Los números cambian día a día. Cuando dudes, consultar directamente:
+>
+> ```bash
+> # Cantidad de reglas activas (BD)
+> .venv/Scripts/python.exe -c "import sqlite3; print(sqlite3.connect('data/catastro.db').execute('SELECT COUNT(*) FROM apt_memoria_operador WHERE activa=1').fetchone()[0])"
+>
+> # Cantidad de tests
+> .venv/Scripts/python.exe -m pytest --collect-only -q | Select-Object -Last 1
+>
+> # Versión de Python en uso (NO confundir con README, que está desactualizado)
+> .venv/Scripts/python.exe --version
+>
+> # Resumen de expedientes
+> .venv/Scripts/python.exe tools/catastro_bot.py resumen --apt
+> ```
+
+**Snapshot 2026-05-22** (referencia, verificar con los comandos de arriba):
+- Python 3.13.13 (Windows)
+- ~96 reglas activas en `apt_memoria_operador`
+- 1480 tests pytest colectados
+- 12 expedientes activos en BD (3 enviados al CFIA esta semana)
+- 9 jobs scheduler corriendo
+- Backup automático local + Drive activo
 
 ## 🧠 Filosofía del proyecto
 

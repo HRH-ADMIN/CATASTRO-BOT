@@ -69,8 +69,11 @@ def _cmd_dashboard(extra_args: list[str]) -> int:
     return _ejecutar_tool("dashboard.py", extra_args)
 
 
-def _cmd_backup(extra_args: list[str]) -> int:
-    return _ejecutar_tool("backup_db.py", extra_args)
+# Nota: el handler `_cmd_backup` está más abajo (línea ~119) y apunta a
+# `src.utils.backup_completo`, que es el flujo completo (BD + .env + config +
+# código + LEEME). Hubo una definición previa apuntando a `backup_db.py` que
+# quedaba sobrescrita silenciosamente — eliminada en housekeeping 2026-05-22
+# (ver PLAN_MEJORAS_catastro-bot_3.md sección "Bugs varios documentados", #1).
 
 
 def _cmd_apt_crear(extra_args: list[str]) -> int:
@@ -199,6 +202,29 @@ def _cmd_health(extra_args: list[str]) -> int:
     return 0 if salud["status"] != "error" else 1
 
 
+def _cmd_install_shortcut(extra_args: list[str]) -> int:
+    """Instala (idempotentemente) un shortcut al dashboard en el Escritorio.
+
+    Delega en tools/install_desktop_shortcut.ps1. Re-ejecutar es seguro:
+    sobreescribe sin error. El icono customizado en assets/icon.ico se usa
+    automáticamente si existe.
+
+    Plan: PLAN_MEJORAS Sprint 1 / U-01.
+    """
+    import subprocess
+    ps_script = ROOT / "tools" / "install_desktop_shortcut.ps1"
+    if not ps_script.exists():
+        print(f"[ERROR] {ps_script} no existe")
+        return 1
+    cmd = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", str(ps_script),
+    ] + extra_args
+    return subprocess.call(cmd)
+
+
 def _cmd_enviar_digest(extra_args: list[str]) -> int:
     """Dispara el digest semanal por email."""
     from src.core.credential_manager import CredentialManager
@@ -250,6 +276,7 @@ SUBCOMANDOS: dict[str, tuple] = {
     "debug":         (_cmd_debug,         "Inspección del bot (bp6/bp7/ddl/estado/chrome)"),
     "health":        (_cmd_health,        "Estado del sistema (JSON)"),
     "enviar-digest": (_cmd_enviar_digest, "Enviar digest semanal por email"),
+    "install-shortcut": (_cmd_install_shortcut, "Crear shortcut del dashboard en el Escritorio"),
 }
 
 
