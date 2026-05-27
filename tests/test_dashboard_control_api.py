@@ -50,6 +50,7 @@ def client(tmp_path, monkeypatch):
         with patch("src.web.app._expected_token", return_value=None):
             app = create_app()
             app.config["TESTING"] = True
+            app.config["CSRF_DISABLED"] = True
             with app.test_client() as c:
                 yield c
 
@@ -261,6 +262,7 @@ class TestAuth:
         with patch("src.web.app.get_control_manager", return_value=legacy_mgr):
             with patch("src.web.app._expected_token", return_value="secret-xyz"):
                 app = create_app()
+                app.config["CSRF_DISABLED"] = True  # testeo auth, no CSRF
                 with app.test_client() as c:
                     # Sin token → 401
                     resp = c.post("/api/control/start/apt")

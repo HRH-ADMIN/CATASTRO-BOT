@@ -943,6 +943,8 @@ def _obtener_estado_bot() -> dict:
 
 
 def _render_html(refresh_sec: int = 30) -> str:
+    from src.web.csrf_js import CSRF_FETCH_WRAPPER_JS as _CSRF_JS  # noqa: F841
+
     exps = _leer_expedientes()
     bot = _obtener_estado_bot()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1185,6 +1187,7 @@ def _render_html(refresh_sec: int = 30) -> str:
     </footer>
 
     <script>
+    {_CSRF_JS}
     // ─── Banner de servicios externos (N-03) ───────────────────────────
     (function () {{
         var bannerEl = document.getElementById("ext-services-banner");

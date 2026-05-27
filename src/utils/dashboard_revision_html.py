@@ -387,6 +387,7 @@ loadRevision();
 
 
 def render_revision_panel_html(expediente_id: str) -> str:
+    from src.web.csrf_js import CSRF_FETCH_WRAPPER_JS as _csrf_js  # noqa: F841
     exp_safe = _html.escape(expediente_id)
     js_with_exp = (
         f"window._expedienteId = {json.dumps(expediente_id)};\n" + _JS
@@ -435,7 +436,8 @@ def render_revision_panel_html(expediente_id: str) -> str:
 
     <div id="flash"></div>
 
-    <script>{js_with_exp}</script>
+    <script>{_csrf_js}
+{js_with_exp}</script>
 </body>
 </html>
 """

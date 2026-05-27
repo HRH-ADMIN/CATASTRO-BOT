@@ -36,6 +36,7 @@ def client(tmp_path, monkeypatch):
         with patch("src.web.app._expected_token", return_value=None):
             app = create_app()
             app.config["TESTING"] = True
+            app.config["CSRF_DISABLED"] = True
             with app.test_client() as c:
                 c._db_path = db_path
                 yield c

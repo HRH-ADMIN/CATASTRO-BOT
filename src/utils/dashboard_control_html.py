@@ -189,6 +189,7 @@ header .meta a { color: #60a5fa; text-decoration: none; }
 
 def render_control_panel_html() -> str:
     """Renderiza la página /config/control. Todo client-side data via /api/control/*."""
+    from src.web.csrf_js import CSRF_FETCH_WRAPPER_JS as _csrf_js  # noqa: F841
 
     # JS se construye con %s al final para no chocar con f-string.
     js = _CONTROL_JS
@@ -235,7 +236,8 @@ def render_control_panel_html() -> str:
 
     <div id="toasts" class="toasts"></div>
 
-    <script>{js}</script>
+    <script>{_csrf_js}
+{js}</script>
 </body>
 </html>
 """

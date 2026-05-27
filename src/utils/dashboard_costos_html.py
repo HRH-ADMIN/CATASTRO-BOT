@@ -129,6 +129,7 @@ td.usd { color: #34d399; font-weight: 600; }
 
 
 def render_costos_panel_html() -> str:
+    from src.web.csrf_js import CSRF_FETCH_WRAPPER_JS as _csrf_js  # noqa: F841
     js = _COSTOS_JS
     return f"""<!DOCTYPE html>
 <html lang="es">
@@ -222,7 +223,8 @@ def render_costos_panel_html() -> str:
         </div>
     </div>
 
-    <script>{js}</script>
+    <script>{_csrf_js}
+{js}</script>
 </body>
 </html>
 """
