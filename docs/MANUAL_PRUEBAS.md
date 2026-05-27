@@ -1788,3 +1788,174 @@ inyectando `REMOTE_ADDR` distintos.
    los buckets activos.
 
 ---
+
+## S-08 — Redacción de PII en logs
+
+**Sprint:** 4
+**Fecha de implementación:** 2026-05-27
+**Branch:** `sprint-4/s-08-pii-redactor`
+
+### Qué hace
+
+Antes: `logs/catastro-bot.log` contenía cédulas, teléfonos y emails de
+los clientes del operador. Si un atacante obtenía el archivo (por
+malware, backup robado, etc.), podía enumerar PII directamente.
+
+Ahora: filtro `PIIRedactor` aplicado al logger root del bot reemplaza
+patrones PII por placeholders ANTES de escribir al archivo o consola.
+
+| Patrón | Ejemplo entrada | Salida |
+|---|---|---|
+| Cédula nacional CR (1-4-4 o 9 dígitos) | `1-1234-5678` / `112345678` | `CEDULA_REDACTED` |
+| Cédula jurídica CR (3-...-... o 10 dígitos con 3 inicial) | `3-101-123456` | `CED_JUR_REDACTED` |
+| DIMEX (extranjero, 12 dígitos) | `118200012345` | `DIMEX_REDACTED` |
+| Teléfono CR (8 dígitos, opc. +506) | `+506 8888 8888` / `88888888` | `TEL_REDACTED` |
+| Email | `topografia@gmail.com` | `EMAIL_REDACTED` |
+
+**Lo que NO se redacta** (necesario para debug):
+- Números de expediente (`RDF-2026-001`, `SEG-2026-005`)
+- IDs de trámite APT (`1258460`)
+- Folios, identificadores prediales
+- Timestamps
+- Logger names, módulos, funciones
+
+**El `audit_log` en BD NO se ve afectado.** Esa data está cifrada y con
+hash chain — la PII se mantiene allí para casos legales/forense.
+
+### Override
+
+```bash
+# Desactivar redacción (development)
+set CATASTRO_LOG_REDACT_PII=0
+```
+
+### Procedimiento
+
+#### 1) Verificar que un mensaje con PII se redacta
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os
+os.environ['CATASTRO_BOT_DEV_MODE'] = '1'
+from src.utils.logger import get_logger
+log = get_logger('test_s08')
+log.info('Cliente 1-1234-5678 con telefono +506 8888 8888')
+log.warning('Email a topografia@gmail.com fallido')
+log.error('Empresa 3-101-123456 sin pagar')
+"
+```
+
+Luego abrir `logs/catastro-bot.log` y verificar que **NO** aparece:
+- `1-1234-5678`
+- `+506 8888 8888`
+- `topografia@gmail.com`
+- `3-101-123456`
+
+Sí debe aparecer:
+- `CEDULA_REDACTED`
+- `TEL_REDACTED`
+- `EMAIL_REDACTED`
+- `CED_JUR_REDACTED`
+
+#### 2) Verificar override desactiva
+
+```powershell
+$env:CATASTRO_LOG_REDACT_PII = "0"
+.venv\Scripts\python.exe -c "
+from src.utils.logger import get_logger
+log = get_logger('test_s08_off')
+log.info('Cliente 1-1234-5678 NO redactado')
+"
+$env:CATASTRO_LOG_REDACT_PII = $null  # restaurar
+```
+
+Esperado: el log SÍ contiene `1-1234-5678` literal.
+
+#### 3) Verificar que audit_log en BD mantiene PII
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os; os.environ['CATASTRO_BOT_DEV_MODE']='1'
+from src.core.credential_manager import CredentialManager
+from src.core.database import Database
+from config.settings import DATABASE_PATH
+
+db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+db.registrar_evento('test_pii',
+                    detalles={'cedula': '1-1234-5678', 'tel': '+506 8888 8888'},
+                    actor='manual-test')
+evt = db.ultimo_evento('test_pii')
+print('Detalles en BD:', evt['detalles_json'])
+"
+```
+
+Esperado: la salida muestra `1-1234-5678` y `+506 8888 8888` literales
+en `detalles_json` — el filtro NO se aplica a la BD (correcto).
+
+#### 4) Verificar logs en producción (bot corriendo)
+
+Después de varios días de operación:
+
+```powershell
+Get-Content logs/catastro-bot.log | Select-String "CEDULA_REDACTED|TEL_REDACTED|EMAIL_REDACTED" | Select-Object -First 20
+```
+
+Esperado: aparecen líneas con los placeholders (señal de que el filtro
+está activo en producción).
+
+```powershell
+# Buscar PII que se haya escapado del filtro
+Get-Content logs/catastro-bot.log | Select-String "\b\d{9}\b|\+506" | Select-Object -First 5
+```
+
+Esperado: vacío (o falsos positivos como números de expediente con 9 dígitos).
+
+### Criterios de aceptación
+
+- [x] Cédula nacional CR (con/sin separadores) → redactada.
+- [x] Cédula jurídica CR → redactada con placeholder distinto.
+- [x] DIMEX (12 dígitos) → redactado.
+- [x] Teléfono CR (con/sin +506) → redactado.
+- [x] Email → redactado.
+- [x] Números de expediente (`RDF-2026-001`) NO se tocan.
+- [x] IDs APT (`1258460`) NO se tocan.
+- [x] Timestamps NO se tocan.
+- [x] `audit_log` en BD mantiene PII original.
+- [x] `CATASTRO_LOG_REDACT_PII=0` desactiva.
+- [x] Idempotente (aplicar 2 veces da lo mismo).
+- [x] `install_on_root_logger` idempotente (no agrega dos veces).
+- [x] Tests: **35 nuevos** (cubren todos los patrones + integration con file handler).
+
+### Tests automatizados relacionados
+
+| Archivo | Tests | Cubre |
+|---|---|---|
+| `test_pii_redactor.py` | 35 | Patrones individuales, filter, integration con file handler |
+
+### Limitaciones conocidas
+
+1. **Folio Real CR ambiguo con cédula.** El formato folio real
+   (`1-1234-5678`) es idéntico a cédula con guiones. Lo redactamos.
+   Pérdida operativa: si un log dice "Folio real 1-1234-5678 inscrito"
+   sale como "Folio real CEDULA_REDACTED inscrito". El operador puede
+   distinguir por el contexto del mensaje. Si molesta, usar el
+   identificador predial (formato 1-12-3456-7890, 4 segmentos —
+   este NO se confunde y NO se redacta).
+2. **Nombre y apellido NO se redactan.** Solo redactamos identificadores
+   numéricos y emails. Si un log dice "Cliente Luis Alonso Rojas firmó",
+   queda intacto. Esto es intencional — los nombres son menos sensibles
+   que cédula/teléfono, y el contexto los necesita.
+3. **Sin redacción retroactiva.** Logs viejos (anteriores a S-08) NO
+   se reformatean. Si se quiere limpiar histórico, hay que correr un
+   script ad-hoc que aplique `redact()` sobre los archivos existentes.
+4. **No redacta JSON estructurado dentro del log.** Si un módulo hace
+   `log.info("payload: %s", json.dumps(datos))` y `datos` tiene cédula,
+   la cédula sí se redacta (el regex es agnóstico de formato). Pero si
+   el log es `{"cedula": "1-1234-5678"}` en una línea separada del
+   logger, también se redacta. OK.
+5. **Cédula de 9 dígitos sin separador puede dar falsos positivos.**
+   Cualquier número de 9 dígitos seguidos será redactado como cédula.
+   Si un futuro endpoint imprime IDs únicos de 9 dígitos, hay que
+   ajustar el patrón o agregar excepciones.
+
+---
