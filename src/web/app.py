@@ -447,6 +447,84 @@ def create_app() -> Flask:
         result = _es.mark_up(DATABASE_PATH, service, reason=reason)
         return jsonify(result)
 
+    # ──────────────────── APT sync status (Sprint 2 / O-06) ────────────
+    # Visibilidad operativa: el operador necesita saber si apt-sync-estados
+    # está corriendo OK, sin tener que mirar logs.
+
+    @app.route("/api/apt-sync-status", methods=["GET"])
+    def api_apt_sync_status():
+        """Snapshot del último ciclo de apt-sync-estados desde audit_log.
+
+        Devuelve el último evento de cada tipo (success, partial, failed,
+        skipped_cdp) más un campo `status` derivado:
+          ok       → último success/partial < 2h
+          stale    → último success/partial entre 2h y 24h
+          down     → último evento fue failed/skipped y no hay éxito reciente
+          unknown  → no hay registros aún
+
+        Sprint 2 / O-06.
+        """
+        from config.settings import DATABASE_PATH
+        from src.core.credential_manager import CredentialManager
+        from src.core.database import Database
+        from datetime import datetime, timedelta
+
+        try:
+            db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+        except Exception as exc:
+            return jsonify({"status": "error", "error": str(exc)[:200]}), 500
+
+        eventos = {
+            k: db.ultimo_evento(k)
+            for k in (
+                "apt_sync_success",
+                "apt_sync_partial",
+                "apt_sync_failed",
+                "apt_sync_skipped_cdp",
+            )
+        }
+
+        def _ts(e):
+            if not e:
+                return None
+            try:
+                t = datetime.fromisoformat(e["timestamp"])
+                # Normalizar a naive UTC para comparaciones consistentes
+                if t.tzinfo is not None:
+                    t = t.astimezone(tz=None).replace(tzinfo=None)
+                return t
+            except Exception:
+                return None
+
+        ts_ok = max(filter(None, [_ts(eventos["apt_sync_success"]),
+                                  _ts(eventos["apt_sync_partial"])]),
+                    default=None)
+        ts_bad = max(filter(None, [_ts(eventos["apt_sync_failed"]),
+                                   _ts(eventos["apt_sync_skipped_cdp"])]),
+                     default=None)
+
+        ahora = datetime.now()
+        if ts_ok is None and ts_bad is None:
+            status = "unknown"
+        elif ts_ok is None:
+            status = "down"
+        elif ts_bad is not None and ts_bad > ts_ok:
+            status = "down"
+        elif (ahora - ts_ok) < timedelta(hours=2):
+            status = "ok"
+        elif (ahora - ts_ok) < timedelta(hours=24):
+            status = "stale"
+        else:
+            status = "down"
+
+        return jsonify({
+            "status": status,
+            "ultimo_ok": eventos["apt_sync_success"] or eventos["apt_sync_partial"],
+            "ultimo_fallo": eventos["apt_sync_failed"],
+            "ultimo_skip_cdp": eventos["apt_sync_skipped_cdp"],
+            "ahora": ahora.isoformat(timespec="seconds"),
+        })
+
     # ─────────────────── Runtime processes (U-02 paso B) ────────────────
     # Capa SO: qué procesos están vivos.
 

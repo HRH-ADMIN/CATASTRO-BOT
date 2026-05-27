@@ -1612,3 +1612,42 @@ class Database:
         args.append(limit)
         with self.connect() as conn:
             return [dict(r) for r in conn.execute(sql, args).fetchall()]
+
+    def registrar_evento(
+        self,
+        accion: str,
+        *,
+        detalles: Optional[dict] = None,
+        actor: str = "system",
+        expediente_id: Optional[str] = None,
+    ) -> None:
+        """API pública para escribir un evento en `audit_log`.
+
+        Pensado para callers fuera de Database (scheduler jobs, healthchecks,
+        sync APT) que necesitan dejar rastro inmutable de eventos del sistema
+        SIN tocar un expediente. El hash chain se sigue calculando igual.
+
+        Sprint 2 / O-06: usado por `_sync_apt_estados` para registrar
+        apt_sync_success / apt_sync_failed / apt_sync_skipped_cdp.
+        """
+        with self._transaction() as conn:
+            self._audit(
+                conn,
+                actor=actor,
+                expediente_id=expediente_id,
+                accion=accion,
+                detalles=detalles,
+            )
+
+    def ultimo_evento(self, accion: str) -> Optional[dict]:
+        """Devuelve el último audit_log con la `accion` dada (o None).
+
+        Útil para widgets de dashboard tipo "último apt_sync_success hace Xh".
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM audit_log WHERE accion = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (accion,),
+            ).fetchone()
+            return dict(row) if row else None
