@@ -201,16 +201,32 @@ class PlanoVisionExtractor:
         kind = "document" if media_type == "application/pdf" else "image"
         source = {"type": "base64", "media_type": media_type, "data": b64}
         try:
-            resp = self._client.messages.create(
+            # O-08: tracking de costo + tokens
+            from config.settings import DATABASE_PATH
+            from src.utils.api_costs import track_anthropic_call
+            # Inferir tipo desde el caller (atributo opcional self._call_tipo)
+            tipo = getattr(self, "_call_tipo", "vision_extract")
+            exp_id = getattr(self, "_call_expediente_id", None)
+
+            def _do_call():
+                return self._client.messages.create(
+                    model=self._model,
+                    max_tokens=8000,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": kind, "source": source},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }],
+                )
+
+            resp = track_anthropic_call(
+                _do_call,
+                db_path=DATABASE_PATH,
                 model=self._model,
-                max_tokens=8000,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": kind, "source": source},
-                        {"type": "text", "text": prompt},
-                    ],
-                }],
+                tipo=tipo,
+                expediente_id=exp_id,
             )
         except Exception as exc:
             self._log.warning("Anthropic API error: %s", exc)

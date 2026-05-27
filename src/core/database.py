@@ -158,6 +158,83 @@ BEGIN
     SELECT RAISE(FAIL, 'audit_log entries are immutable');
 END;
 
+-- ── Costos de API Anthropic (Sprint 4 / O-08) ────────────────────────────────
+-- Una fila por llamada al cliente Anthropic con tokens consumidos +
+-- costo calculado en USD. Permite agregaciones diario/mensual + budget
+-- tracking + alertas a 80%.
+--
+-- Plan: PLAN_MEJORAS Sprint 4 / O-08.
+CREATE TABLE IF NOT EXISTS api_costs (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                       TEXT NOT NULL DEFAULT (datetime('now')),
+    provider                 TEXT NOT NULL,
+    model                    TEXT NOT NULL,
+    tipo                     TEXT NOT NULL,
+    expediente_id            TEXT,
+    input_tokens             INTEGER NOT NULL DEFAULT 0,
+    output_tokens            INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens        INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens    INTEGER NOT NULL DEFAULT 0,
+    cost_usd                 REAL NOT NULL DEFAULT 0,
+    duration_ms              INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_api_costs_ts       ON api_costs(ts);
+CREATE INDEX IF NOT EXISTS idx_api_costs_tipo     ON api_costs(tipo);
+CREATE INDEX IF NOT EXISTS idx_api_costs_exp      ON api_costs(expediente_id);
+CREATE INDEX IF NOT EXISTS idx_api_costs_provider ON api_costs(provider, ts);
+
+DROP VIEW IF EXISTS v_api_costs_mensual;
+CREATE VIEW v_api_costs_mensual AS
+SELECT
+    substr(ts, 1, 7)           AS mes,
+    provider, model,
+    COUNT(*)                    AS llamadas,
+    SUM(input_tokens)           AS total_input,
+    SUM(output_tokens)          AS total_output,
+    SUM(cache_read_tokens)      AS total_cache_read,
+    SUM(cache_creation_tokens)  AS total_cache_write,
+    ROUND(SUM(cost_usd), 4)     AS total_usd
+FROM api_costs
+GROUP BY mes, provider, model
+ORDER BY mes DESC, total_usd DESC;
+
+DROP VIEW IF EXISTS v_api_costs_diario;
+CREATE VIEW v_api_costs_diario AS
+SELECT
+    substr(ts, 1, 10) AS dia,
+    COUNT(*) AS llamadas,
+    SUM(input_tokens + output_tokens) AS total_tokens,
+    ROUND(SUM(cost_usd), 4) AS total_usd
+FROM api_costs
+WHERE ts >= date('now', '-31 days')
+GROUP BY dia
+ORDER BY dia DESC;
+
+DROP VIEW IF EXISTS v_api_costs_por_expediente;
+CREATE VIEW v_api_costs_por_expediente AS
+SELECT
+    expediente_id,
+    COUNT(*) AS llamadas,
+    SUM(input_tokens + output_tokens) AS total_tokens,
+    ROUND(SUM(cost_usd), 4) AS total_usd,
+    MIN(ts) AS primera_llamada,
+    MAX(ts) AS ultima_llamada
+FROM api_costs
+WHERE expediente_id IS NOT NULL
+GROUP BY expediente_id
+ORDER BY total_usd DESC;
+
+CREATE TABLE IF NOT EXISTS api_budget (
+    id                INTEGER PRIMARY KEY CHECK (id = 1),
+    monthly_usd       REAL NOT NULL DEFAULT 50.0,
+    alert_threshold   REAL NOT NULL DEFAULT 0.80,
+    last_alert_at     TEXT,
+    last_alert_mes    TEXT,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT OR IGNORE INTO api_budget (id, monthly_usd, alert_threshold)
+    VALUES (1, 50.0, 0.80);
+
 -- ── Salud de servicios externos (Sprint 4 / N-03) ────────────────────────────
 -- Estado persistente de servicios externos (Green API, Anthropic, Drive, etc.).
 -- A diferencia de module_state (intención del operador) y runtime_processes

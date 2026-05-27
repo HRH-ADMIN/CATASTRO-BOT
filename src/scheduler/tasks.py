@@ -362,6 +362,51 @@ def _horas_desde(iso_ts: str) -> int:
         return -1
 
 
+# ── Alerta de budget Anthropic (Sprint 4 / O-08 sub-paso D) ────────────────────
+
+def _api_budget_alert(orchestrator: "Orchestrator") -> None:
+    """Si el consumo del mes superó el threshold del budget, alerta al admin.
+
+    Idempotente por mes — check_budget_alert() trackea last_alert_mes y
+    devuelve None si ya alertamos este mes (evita spam).
+
+    Usa enviar_mensaje() del WhatsAppAgent que ya tiene fallback email de N-03:
+    si Green API está caído, la alerta sale por email automáticamente.
+    """
+    from config.settings import DATABASE_PATH
+    from src.utils import api_costs as _ac
+
+    alert = _ac.check_budget_alert(DATABASE_PATH)
+    if not alert:
+        return
+
+    msg = (
+        f"⚠️ *Alerta de presupuesto IA*\n"
+        f"Consumo del mes ({alert['mes']}): "
+        f"*${alert['spend_usd']:.2f} USD* "
+        f"({alert['ratio']*100:.1f}% del budget ${alert['budget_usd']:.0f})\n"
+        f"Threshold configurado: {alert['threshold_pct']:.0f}%\n\n"
+        f"Ver detalle: http://localhost:9224/config/costos"
+    )
+
+    try:
+        admins = orchestrator.db.listar_usuarios(rol="admin", activo=True)
+        if not admins:
+            _log.warning("api-budget-alert: no hay admins para notificar")
+            return
+        for admin in admins[:1]:
+            orchestrator.whatsapp.enviar_mensaje(
+                admin["telefono"], msg, contexto="budget_alert",
+            )
+            _log.info(
+                "api-budget-alert: enviado a admin ($%.2f / $%.0f = %.0f%%)",
+                alert["spend_usd"], alert["budget_usd"], alert["ratio"]*100,
+            )
+            break
+    except Exception:
+        _log.exception("api-budget-alert falló")
+
+
 # ── Auto-recovery de Green API (Sprint 4 / N-03 sub-paso C) ────────────────────
 
 def _greenapi_recovery(orchestrator: "Orchestrator") -> None:
@@ -776,11 +821,27 @@ def register_jobs(
         replace_existing=True,
     )
 
+    # ── Alerta budget Anthropic (O-08) — cada 6 h — gate "whatsapp" ─────
+    # check_budget_alert() es idempotente por mes (last_alert_mes), así
+    # que aunque corra cada 6h solo emite 1 alerta por mes/operador.
+    scheduler.add_job(
+        _gated(_api_budget_alert, module="whatsapp",
+               manager=control_manager, job_id="api-budget-alert"),
+        trigger="interval",
+        hours=6,
+        args=[orchestrator],
+        id="api-budget-alert",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+
     gate_mode = "with gate" if control_manager else "no gate (legacy)"
     _log.info(
-        "scheduler: 10 jobs registrados (%s) "
+        "scheduler: 11 jobs registrados (%s) "
         "(tick, audit-verify, db-backup, stale-alert, weekly-report, "
         "correcciones-renotif, apt-sync-estados, muni-sync-emails-arranque, "
-        "muni-sync-emails [11:00+14:00 CR L-V], greenapi-recovery)",
+        "muni-sync-emails [11:00+14:00 CR L-V], greenapi-recovery, "
+        "api-budget-alert [6h])",
         gate_mode,
     )

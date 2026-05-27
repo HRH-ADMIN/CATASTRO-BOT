@@ -1130,6 +1130,8 @@ def _render_html(refresh_sec: int = 30) -> str:
             &nbsp;|&nbsp;
             <a href="/config/runtime" style="color:#60a5fa">🖥️ Procesos</a>
             &nbsp;|&nbsp;
+            <a href="/config/costos" style="color:#60a5fa">💲 Costos</a>
+            &nbsp;|&nbsp;
             <a href="/" style="color:#60a5fa" id="reload-now">refrescar ahora</a>
         </div>
     </header>
