@@ -1498,3 +1498,159 @@ luego `audit-root-replicate: ok=True email=True drive=...`.
    descargue los hashes de Drive y compare).
 
 ---
+
+## S-04 — CSRF tokens en dashboard
+
+**Sprint:** 4
+**Fecha de implementación:** 2026-05-27
+**Branch:** `sprint-4/s-04-csrf-tokens`
+
+### Qué hace
+
+El dashboard escucha en `127.0.0.1` (no expuesto a la LAN), pero un
+browser malicioso local (extensión hostil, página atacante abierta en
+otra pestaña) podría enviar POSTs al dashboard usando las cookies del
+usuario. Para defenderse de eso, ahora **todas las mutaciones** del
+dashboard (POST/PUT/DELETE/PATCH) requieren un **token CSRF**.
+
+**Patrón: double-submit cookie** (sin flask-wtf, sin sesiones).
+
+1. En el primer GET de una página HTML, el server setea una cookie
+   `catastro_csrf` con un random hex de 64 caracteres (SameSite=Strict).
+2. El JS del dashboard parchea `window.fetch` para leer la cookie y
+   agregarla en el header `X-CSRF-Token` en todos los POST/PUT/DELETE/PATCH.
+3. El middleware Flask verifica `request.cookies[csrf] == request.headers[X-CSRF-Token]`.
+4. Si no coinciden o falta uno → **403 csrf_token_invalid_or_missing**.
+
+**Exenciones:**
+- GET/HEAD/OPTIONS (no mutan).
+- Requests con `Authorization: Bearer <token>` válido (clientes máquina:
+  CLI, scripts internos — ya autenticaron con bearer fuerte).
+
+### Procedimiento
+
+#### 1) GET captura cookie automáticamente
+
+```powershell
+# Sin importar la BD productiva: arrancar dashboard
+.venv\Scripts\python.exe -m src.utils.dashboard_web --port 9224 &
+Start-Sleep -Seconds 2
+
+# Primer GET — observar Set-Cookie en la response
+curl -i http://localhost:9224/ 2>&1 | Select-String -Pattern "catastro_csrf"
+```
+
+Esperado: línea como
+`Set-Cookie: catastro_csrf=<64 hex chars>; Max-Age=604800; HttpOnly=false; SameSite=Strict`.
+
+#### 2) POST sin token → 403
+
+```powershell
+curl -i -X POST http://localhost:9224/api/pause 2>&1 | Select-String -Pattern "HTTP|error"
+```
+
+Esperado: `HTTP/1.1 403 FORBIDDEN` y body con `{"error": "csrf_token_invalid_or_missing"}`.
+
+#### 3) POST con cookie+header iguales → 200
+
+```powershell
+# Guardar la cookie del GET en jar, luego usarla
+curl -c jar.txt http://localhost:9224/ -o $null
+$token = (Get-Content jar.txt | Select-String "catastro_csrf").Line.Split("`t")[-1]
+curl -b jar.txt -X POST -H "X-CSRF-Token: $token" http://localhost:9224/api/pause
+```
+
+Esperado: `200 OK` y el bot pasa a paused.
+
+#### 4) POST con cookie≠header → 403
+
+```powershell
+curl -b "catastro_csrf=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" `
+     -H "X-CSRF-Token: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" `
+     -X POST http://localhost:9224/api/pause
+```
+
+Esperado: `403 FORBIDDEN`.
+
+#### 5) Bearer válido exime CSRF
+
+Si tenés un `dashboard-token` configurado:
+
+```powershell
+curl -H "Authorization: Bearer <tu-token>" `
+     -X POST http://localhost:9224/api/pause
+```
+
+Esperado: `200 OK` sin necesidad de cookie ni X-CSRF-Token. (Los clientes
+máquina ya autenticaron con un secret fuerte — no necesitan CSRF que
+es defensa contra el browser).
+
+#### 6) Verificar en el browser real
+
+1. Abrir `http://localhost:9224/`.
+2. DevTools → Application → Cookies → buscar `catastro_csrf`.
+3. Click en cualquier botón de mutación (Pause, Start, Stop módulo).
+4. Network tab → ver que el request tiene header `X-CSRF-Token` con el
+   mismo valor que la cookie.
+
+#### 7) Atacante simulado: POST cross-origin
+
+Crear una página `attacker.html` en cualquier directorio:
+
+```html
+<html><body>
+<script>
+fetch('http://localhost:9224/api/control/emergency-stop', {
+    method: 'POST',
+    body: JSON.stringify({confirmation: 'EMERGENCY-STOP'}),
+    headers: {'Content-Type': 'application/json'}
+});
+</script>
+</body></html>
+```
+
+Abrirla en el browser. Network tab → ver que el request resulta en
+**403** porque:
+- La cookie NO se envía (SameSite=Strict).
+- El header X-CSRF-Token no se setea (el JS del atacante no tiene la cookie).
+
+### Criterios de aceptación
+
+- [x] POST sin token → **403**.
+- [x] POST con token válido (cookie==header) → procesado normalmente.
+- [x] GET no requiere token.
+- [x] Bearer válido exime CSRF (clientes máquina).
+- [x] SameSite=Strict bloquea CSRF cross-origin.
+- [x] Cookie solo se setea en responses HTML (no en JSON APIs).
+- [x] Flag `app.config['CSRF_DISABLED']=True` apaga el middleware (sólo para tests).
+- [x] Tests: **23 nuevos** (7 módulo puro + 3 snippet JS + 11 integración Flask + 2 cookie scope).
+- [x] Fixtures de tests existentes actualizados con `CSRF_DISABLED=True` en 7 archivos.
+
+### Tests automatizados relacionados
+
+| Archivo | Tests | Cubre |
+|---|---|---|
+| `test_csrf.py` | 23 | Módulo puro, snippet JS, integración Flask completa |
+
+### Limitaciones conocidas
+
+1. **El test client de Flask preserva cookies entre requests.** Por eso
+   los fixtures usan `CSRF_DISABLED=True` para tests de funcionalidad
+   no-CSRF — no porque CSRF rompa algo en producción, sino para que
+   los tests no tengan que hacer un GET previo por cada POST.
+2. **Cookie NO es HttpOnly.** Es intencional — el JS la lee. Pero eso
+   significa que si un atacante logra XSS, puede leer la cookie. La
+   defensa contra XSS es no usar `innerHTML` con strings de servidor —
+   ya estamos OK ahí (todo es texto via `textContent`).
+3. **SameSite=Strict puede ser molesto si el operador abre un link al
+   dashboard desde otra app** (Outlook, WhatsApp Desktop). El primer GET
+   tras un click externo no traerá la cookie → setea una nueva → todo
+   bien. No bloquea funcionalidad, solo "recicla" el token.
+4. **CLI clientes deben usar Bearer (no CSRF).** Si un script externo
+   necesita POST contra el dashboard, debe configurar `dashboard-token`
+   en Credential Manager y usar `Authorization: Bearer ...`. NO hay
+   forma de obtener un CSRF token vía API — es solo para browsers.
+5. **Token NO expira.** Vive 7 días en la cookie y se reutiliza. Si
+   eso preocupa, rotar manualmente borrando la cookie del browser.
+
+---

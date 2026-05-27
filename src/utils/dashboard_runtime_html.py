@@ -123,6 +123,7 @@ td.actions button {
 
 
 def render_runtime_panel_html() -> str:
+    from src.web.csrf_js import CSRF_FETCH_WRAPPER_JS as _csrf_js  # noqa: F841
     js = _RUNTIME_JS
     return f"""<!DOCTYPE html>
 <html lang="es">
@@ -170,7 +171,8 @@ def render_runtime_panel_html() -> str:
         </table>
     </div>
 
-    <script>{js}</script>
+    <script>{_csrf_js}
+{js}</script>
 </body>
 </html>
 """

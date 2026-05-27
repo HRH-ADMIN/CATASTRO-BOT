@@ -82,12 +82,31 @@ def _require_auth_for_mutations() -> Optional[tuple[dict, int]]:
 
 # ── Factoría de la app ─────────────────────────────────────────────────
 
+def _request_has_valid_bearer() -> bool:
+    """Devuelve True si el request actual tiene Bearer token válido.
+
+    Usado por el middleware CSRF para eximir clientes máquina (CLI,
+    scripts) que ya autentican con bearer fuerte.
+    """
+    expected = _expected_token()
+    if not expected:
+        return False
+    auth = request.headers.get("Authorization", "")
+    return verify_bearer_token(auth, expected=expected)
+
+
 def create_app() -> Flask:
     """Construye la app Flask. Idempotente — llamala una vez por proceso."""
     app = Flask("catastro-bot")
     # Importes diferidos para evitar costo en imports al cargar el módulo
     # cuando se usa solo el factory para tests.
     from src.utils import dashboard_web as legacy
+    from src.web.csrf import install_csrf_protection
+
+    # ──────────────────────────── CSRF (Sprint 4 / S-04) ────────────────
+    # Double-submit cookie pattern. Middleware verifica POST/PUT/DELETE
+    # antes de llegar a los handlers. Exenciones: GETs y Bearer válido.
+    install_csrf_protection(app, is_bearer_authorized=_request_has_valid_bearer)
 
     # ──────────────────────────── HTML pages ────────────────────────────
 
