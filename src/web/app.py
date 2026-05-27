@@ -207,6 +207,42 @@ def create_app() -> Flask:
         )
         return jsonify(new_state.to_dict())
 
+    # ──────── Bitácora diaria (Sprint 5 / N-09) ────────────────────────
+
+    @app.route("/api/bitacora", methods=["GET"])
+    def api_bitacora():
+        """Devuelve la bitácora del día solicitado en formato dict/markdown.
+
+        Query params:
+          fecha=YYYY-MM-DD (default: hoy CR)
+          format=json|markdown|text (default: json)
+        """
+        from config.settings import DATABASE_PATH
+        from src.utils import daily_log
+        fecha = request.args.get("fecha") or daily_log._fecha_default()
+        formato = request.args.get("format", "json").lower()
+        data = daily_log.recopilar(DATABASE_PATH, fecha)
+        if formato == "markdown":
+            return daily_log.formatear_markdown(data), 200, {
+                "Content-Type": "text/markdown; charset=utf-8",
+            }
+        if formato == "text":
+            return daily_log.formatear_texto(data), 200, {
+                "Content-Type": "text/plain; charset=utf-8",
+            }
+        return jsonify(data)
+
+    @app.route("/api/bitacoras", methods=["GET"])
+    def api_bitacoras_lista():
+        """Lista las bitácoras guardadas en docs/bitacoras/."""
+        try:
+            from src.utils.dashboard_web import ROOT
+        except (ImportError, AttributeError):
+            from pathlib import Path
+            ROOT = Path.cwd()
+        from src.utils import daily_log
+        return jsonify({"fechas": daily_log.listar_bitacoras(ROOT)})
+
     # ──────── Revisiones pre-envío (Sprint 5 / N-02) ───────────────────
     # Cola de revisión visual antes del click irreversible "Enviar al CFIA".
 
