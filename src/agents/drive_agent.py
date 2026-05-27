@@ -430,6 +430,105 @@ class DriveAgent(BaseAgent):
             self._log.exception("subir_backup falló")
             return {"ok": False, "error": str(exc)[:200]}
 
+    # ──────────────────────────────────────────────────────────────────────
+    # Replicación de hash root del audit_log (Sprint 2 / N-10)
+    # ──────────────────────────────────────────────────────────────────────
+
+    def subir_audit_root(self, linea: str) -> dict:
+        """Append a `audit_roots.txt` en `/catastro-bot/audit-roots/`.
+
+        Como Google Drive no soporta append nativo, el flujo es:
+          1. Encontrar el archivo existente (o crearlo vacío).
+          2. Descargar su contenido actual.
+          3. Concatenar `linea` al final.
+          4. Re-subir el contenido (sobrescribir el mismo file_id).
+
+        El archivo es texto plano TSV: `iso_ts \\t audit_id \\t audit_ts \\t hash`.
+        Cada noche se le agrega una línea — crece ~80 bytes/día.
+
+        Args:
+            linea: línea YA terminada en \\n.
+
+        Returns:
+            dict {ok: bool, file_id: str|None, lineas_total: int|None, error: str|None}
+
+        Sprint 2 / N-10.
+        """
+        try:
+            from googleapiclient.http import MediaInMemoryUpload
+        except ImportError:
+            return {"ok": False, "error": "google-api-python-client no instalado"}
+
+        try:
+            service = self._get_service()
+            root_id = self._get_root_folder_id(service)
+            audit_folder_id = self._get_or_create_folder(
+                service, "audit-roots", root_id,
+            )
+
+            # Buscar archivo audit_roots.txt en esa carpeta
+            q = (
+                f"name='audit_roots.txt' "
+                f"and '{audit_folder_id}' in parents "
+                f"and trashed=false"
+            )
+            results = (
+                service.files()
+                .list(q=q, fields="files(id)", pageSize=1)
+                .execute()
+            )
+            items = results.get("files", [])
+
+            if items:
+                file_id = items[0]["id"]
+                # Descargar contenido existente
+                contenido = service.files().get_media(fileId=file_id).execute()
+                if isinstance(contenido, bytes):
+                    contenido = contenido.decode("utf-8", errors="replace")
+                else:
+                    contenido = str(contenido)
+            else:
+                file_id = None
+                contenido = ""
+
+            nuevo = contenido + linea
+            data_bytes = nuevo.encode("utf-8")
+            media = MediaInMemoryUpload(
+                data_bytes, mimetype="text/plain", resumable=False
+            )
+
+            if file_id:
+                service.files().update(
+                    fileId=file_id, media_body=media,
+                ).execute()
+            else:
+                file_metadata = {
+                    "name":     "audit_roots.txt",
+                    "parents":  [audit_folder_id],
+                    "mimeType": "text/plain",
+                }
+                created = (
+                    service.files()
+                    .create(body=file_metadata, media_body=media, fields="id")
+                    .execute()
+                )
+                file_id = created["id"]
+
+            lineas_total = nuevo.count("\n")
+            self._log.info(
+                "audit-root subido a Drive (%d líneas, %d bytes) → %s",
+                lineas_total, len(data_bytes), file_id,
+            )
+            return {
+                "ok":           True,
+                "file_id":      file_id,
+                "lineas_total": lineas_total,
+                "bytes":        len(data_bytes),
+            }
+        except Exception as exc:
+            self._log.exception("subir_audit_root falló")
+            return {"ok": False, "error": str(exc)[:200]}
+
     def listar_backups_drive(self) -> list[dict]:
         """Lista los backups en /catastro-bot/backups/ ordenados por fecha desc."""
         try:

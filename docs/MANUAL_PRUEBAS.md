@@ -1286,3 +1286,215 @@ stale-alert enviado a +50688888888 (2 exp nuevos / 5 totales)
    está lista para `apt_correcciones`, `cliente_pendiente_pago`, etc.
 
 ---
+
+## N-10 — Replicación externa del hash root del audit_log
+
+**Sprint:** 2
+**Fecha de implementación:** 2026-05-27
+**Branch:** `sprint-2/n-10-audit-root-replication`
+
+### Qué hace
+
+Cada noche, después de que `audit-verify` confirma que la cadena de
+hashes del `audit_log` está intacta, el bot toma el hash del último
+registro y lo replica a **dos destinos independientes**:
+
+1. **Email** al operador (Gmail vía SMTP, credenciales `muni-san-ramon`).
+   - Subject: `[catastro-bot] Audit root YYYY-MM-DD: <hash_corto>`
+   - Body: hash completo + audit_log_id + timestamp + instrucciones
+2. **Drive**: append a `audit_roots.txt` en `/catastro-bot/audit-roots/`.
+   - Formato TSV: `iso_ts \t audit_id \t audit_ts \t hash_completo`
+
+Cada intento queda registrado en la tabla `audit_root_replicas` con
+shape `{timestamp, root_hash, audit_log_id, destinos_json, ok}`.
+
+**Para qué sirve esto:** detectar tampering retroactivo de la BD.
+Si un atacante modifica el `audit_log` localmente y "ajusta" los
+hashes para que la cadena cuadre, los hashes externos guardados en
+email + Drive NO coincidirán con los actuales en la BD. El operador
+puede compararlos manualmente y detectar la divergencia.
+
+Importante: comprometer ambos destinos a la vez requiere comprometer
+2 cuentas distintas del operador (Gmail + Drive), no solo el dispositivo.
+
+### Idempotencia
+
+Si el hash del último registro NO cambió desde la última replicación
+(no hubo nueva actividad en `audit_log`), el job hace **skip** — no
+spamea el email diariamente con el mismo hash. Solo replica cuando
+hay nueva actividad real.
+
+### Procedimiento
+
+#### 1) Verificar el flujo manualmente
+
+Pre-requisito: credenciales `muni-san-ramon` configuradas.
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os; os.environ['CATASTRO_BOT_DEV_MODE']='1'
+from src.core.credential_manager import CredentialManager
+from src.core.database import Database
+from src.utils import audit_root_replicator as arr
+from config.settings import DATABASE_PATH
+
+db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+creds = CredentialManager()
+
+# Forzar replicación (ignorar idempotencia)
+res = arr.replicar(db, creds, drive_agent=None, force=True)
+print('ok:', res['ok'])
+print('hash:', (res['root_hash'] or '')[:24], '...')
+print('audit_log_id:', res['audit_log_id'])
+print('destinos:', res['destinos'])
+"
+```
+
+Esperado: email llega a la cuenta del operador con subject `[catastro-bot] Audit root YYYY-MM-DD: <hash>`.
+
+#### 2) Verificar idempotencia
+
+Re-ejecutar el comando anterior **sin** `--force` (quitar `force=True`):
+
+```python
+res = arr.replicar(db, creds, drive_agent=None)  # sin force
+```
+
+Esperado:
+```
+ok: True
+skipped: True
+```
+
+Sin nuevos eventos en `audit_log`, no debe spamear de nuevo.
+
+#### 3) Forzar nuevo evento y verificar que replica
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os; os.environ['CATASTRO_BOT_DEV_MODE']='1'
+from src.core.credential_manager import CredentialManager
+from src.core.database import Database
+from src.utils import audit_root_replicator as arr
+from config.settings import DATABASE_PATH
+
+db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+db.registrar_evento('test_n10', detalles={'demo': 1})
+res = arr.replicar(db, CredentialManager(), drive_agent=None)
+print('skipped:', res['skipped'])
+print('hash nuevo:', res['root_hash'][:24])
+"
+```
+
+Esperado: `skipped: False` y nuevo email llega (porque el hash cambió).
+
+#### 4) Verificar Drive (si autorizado)
+
+Con Drive autorizado:
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os; os.environ['CATASTRO_BOT_DEV_MODE']='1'
+from src.core.credential_manager import CredentialManager
+from src.core.database import Database
+from src.agents.drive_agent import DriveAgent
+from src.utils import audit_root_replicator as arr
+from config.settings import DATABASE_PATH
+
+db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+da = DriveAgent(db, CredentialManager())
+res = arr.replicar(db, CredentialManager(), drive_agent=da, force=True)
+print('drive:', res['destinos']['drive'])
+"
+```
+
+Luego abrir Drive → `catastro-bot/audit-roots/audit_roots.txt` →
+verificar que tiene la nueva línea al final.
+
+#### 5) Verificar registro en BD
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os; os.environ['CATASTRO_BOT_DEV_MODE']='1'
+from src.core.credential_manager import CredentialManager
+from src.core.database import Database
+from src.utils.audit_root_replicator import listar_replicas
+from config.settings import DATABASE_PATH
+
+db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+for r in listar_replicas(db, limit=5):
+    print(r['timestamp'], '|', r['root_hash'][:24], '|', 'ok=', r['ok'])
+"
+```
+
+Esperado: lista de replicaciones recientes, todas con `ok=1` (o `0` si fallaron).
+
+#### 6) Verificar el hook integrado con `audit-verify`
+
+El job `audit-verify` corre 03:00 UTC. Después de que valida la cadena,
+dispara automáticamente la replicación. Para probarlo sin esperar:
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os; os.environ['CATASTRO_BOT_DEV_MODE']='1'
+from unittest.mock import MagicMock
+from src.core.credential_manager import CredentialManager
+from src.core.database import Database
+from src.scheduler.tasks import _verify_audit_safe
+from config.settings import DATABASE_PATH
+
+db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+orch = MagicMock()
+orch.db = db
+orch.credentials = CredentialManager()
+_verify_audit_safe(orch)
+print('audit-verify + replicate corrido manualmente')
+"
+```
+
+Revisar logs: debería decir `audit chain verificado (N entradas)` y
+luego `audit-root-replicate: ok=True email=True drive=...`.
+
+### Criterios de aceptación
+
+- [x] Tabla `audit_root_replicas` existe con CHECK ok IN (0,1).
+- [x] `obtener_hash_root` devuelve último audit_log o None.
+- [x] `replicar` envía email + (opcional) Drive append.
+- [x] Idempotencia: mismo hash sin force → skipped.
+- [x] Force=True ignora idempotencia.
+- [x] Email falla pero Drive OK → ok=True (al menos uno).
+- [x] Ambos fallan → ok=False y fila queda registrada con ok=0.
+- [x] Hook en `_verify_audit_safe` NO replica si la cadena está rota
+      (no divulgar tampering al exterior).
+- [x] DriveAgent.subir_audit_root hace append a texto plano (download+append+upload porque Drive no soporta append nativo).
+- [x] Tests: **21 nuevos** (3 schema + 4 obtener + 10 replicar + 2 formato + 2 hook).
+
+### Tests automatizados relacionados
+
+| Archivo | Tests | Cubre |
+|---|---|---|
+| `test_audit_root_replicator.py` | 21 | Schema, hash root, replicar, formato, hook |
+
+### Limitaciones conocidas
+
+1. **Email único.** Va al `muni-san-ramon` user. Si se quiere CC al
+   administrador (otro topógrafo, abogado), pasar `email_destinatario`
+   explícito o extender para una lista.
+2. **Drive bajaba archivo completo cada vez.** Drive API no soporta
+   append nativo, así que cada replicación descarga `audit_roots.txt`,
+   le agrega una línea y re-sube. Crece ~80 bytes/día → 30 KB/año →
+   no es problema operativamente. Pero si crece mucho, conviene
+   rotar (un archivo por año).
+3. **Si `audit-verify` falla, NO se replica.** Esto es intencional —
+   replicar un hash de una cadena rota le diría al exterior "mirá,
+   me tamperearon", y eso es información valiosa para el atacante.
+   El operador igual ve el error en logs.
+4. **Drive es opcional.** Si el bot no está autorizado con Google
+   Drive, solo se envía email. La idempotencia + email son
+   suficientes como anti-tamper baseline.
+5. **Verificación de tampering es MANUAL.** El bot deja los hashes
+   replicados — comparar contra la BD actual es responsabilidad del
+   operador (script futuro `catastro-bot audit-verify-external` que
+   descargue los hashes de Drive y compare).
+
+---
