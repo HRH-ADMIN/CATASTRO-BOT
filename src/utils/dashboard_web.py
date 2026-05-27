@@ -967,8 +967,10 @@ def _render_html(refresh_sec: int = 30) -> str:
         tramite = e["tramite"] or "—"
         proyecto = html.escape(e.get("proyecto") or "—")[:20]
         cliente = html.escape(e["cliente"] or "—")[:35]
+        # data-numero permite que la búsqueda global (N-07) localice
+        # y haga scroll/highlight a la fila al click en un resultado.
         rows_html += f"""
-        <tr>
+        <tr data-numero="{html.escape(e["numero"])}" id="row-{html.escape(e["numero"])}">
             <td class="expediente">{html.escape(e["numero"])}</td>
             <td><span class="etapa" style="background:{color}">{html.escape(etapa)}</span></td>
             <td class="tramite">{html.escape(str(tramite))}</td>
@@ -1105,6 +1107,76 @@ def _render_html(refresh_sec: int = 30) -> str:
         0%, 100% {{ opacity: 1; }}
         50% {{ opacity: 0.4; }}
     }}
+    /* Búsqueda global (N-07) */
+    #search-wrap {{
+        position: relative;
+        margin: 8px 0 0 0;
+        max-width: 600px;
+    }}
+    #search-box {{
+        width: 100%;
+        padding: 8px 12px;
+        font-size: 14px;
+        background: #0f172a;
+        color: #f1f5f9;
+        border: 1px solid #334155;
+        border-radius: 6px;
+        outline: none;
+        box-sizing: border-box;
+    }}
+    #search-box:focus {{
+        border-color: #60a5fa;
+        box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.25);
+    }}
+    #search-results {{
+        position: absolute; top: 100%; left: 0; right: 0;
+        background: #1e293b;
+        border: 1px solid #334155;
+        border-top: none;
+        border-radius: 0 0 6px 6px;
+        max-height: 400px; overflow-y: auto;
+        z-index: 100;
+        display: none;
+    }}
+    #search-results.show {{ display: block; }}
+    #search-results .item {{
+        padding: 10px 12px;
+        cursor: pointer;
+        border-bottom: 1px solid #334155;
+        display: block;
+        text-decoration: none;
+        color: inherit;
+    }}
+    #search-results .item:last-child {{ border-bottom: none; }}
+    #search-results .item:hover, #search-results .item.active {{
+        background: #334155;
+    }}
+    #search-results .item .num  {{ color: #60a5fa; font-weight: 600; }}
+    #search-results .item .tipo {{ color: #94a3b8; font-size: 12px; }}
+    #search-results .item .cli  {{ color: #f1f5f9; }}
+    #search-results .item .estado {{
+        display: inline-block; padding: 2px 8px; border-radius: 10px;
+        background: #475569; font-size: 11px; color: #f1f5f9;
+        margin-left: 8px;
+    }}
+    #search-results .item .match {{
+        color: #fbbf24; font-size: 11px; font-style: italic;
+        margin-left: 6px;
+    }}
+    #search-results .empty,
+    #search-results .err {{
+        padding: 12px; color: #94a3b8; font-style: italic;
+        text-align: center;
+    }}
+    #search-results .err {{ color: #f87171; }}
+    /* Flash de fila destino al click resultado */
+    tr.row-highlight {{
+        animation: row-highlight-anim 2s ease-out;
+    }}
+    @keyframes row-highlight-anim {{
+        0%   {{ background: rgba(251, 191, 36, 0.55); }}
+        100% {{ background: transparent; }}
+    }}
     /* Chip APT sync (O-06) */
     #apt-sync-chip {{
         display: inline-flex; align-items: center; gap: 6px;
@@ -1138,6 +1210,12 @@ def _render_html(refresh_sec: int = 30) -> str:
     </div>
     <header>
         <h1>📐 Catastro Bot — Dashboard</h1>
+        <!-- Búsqueda global (N-07) -->
+        <div id="search-wrap">
+            <input type="search" id="search-box" placeholder="🔍 Buscar expediente, cliente, trámite APT..."
+                   autocomplete="off" spellcheck="false">
+            <div id="search-results"></div>
+        </div>
         <div class="meta">
             Última actualización (server): <strong>{now}</strong> &nbsp;|&nbsp;
             Total expedientes: <strong>{len(exps)}</strong> &nbsp;|&nbsp;
@@ -1334,6 +1412,118 @@ def _render_html(refresh_sec: int = 30) -> str:
         loadPendientes();
         setInterval(loadPendientes, 30000);
         window._revisionesReload = loadPendientes;
+    }})();
+
+    // ─── Búsqueda global (Sprint 5 / N-07) ────────────────────────────
+    // Caja en header con autocomplete dropdown. Tipear ≥2 chars dispara
+    // GET /api/search?q=. Click en resultado:
+    //   - si el row existe en la tabla actual → scroll + highlight
+    //   - si no (filtrado fuera) → recarga / con focus
+    (function () {{
+        var box     = document.getElementById("search-box");
+        var results = document.getElementById("search-results");
+        if (!box || !results) return;
+
+        var debounceTimer = null;
+        var lastQuery = "";
+
+        function esc(s) {{
+            var div = document.createElement("div");
+            div.textContent = s == null ? "" : String(s);
+            return div.innerHTML;
+        }}
+
+        function highlightRow(numero) {{
+            // Buscar fila por data-numero
+            var row = document.querySelector(
+                '#expedientes-tbody tr[data-numero="' + numero + '"]'
+            );
+            if (!row) {{
+                // No está en la tabla actual (filtrada/oculta) → reload con anchor
+                window.location.href = "/#row-" + encodeURIComponent(numero);
+                return;
+            }}
+            row.scrollIntoView({{ behavior: "smooth", block: "center" }});
+            row.classList.remove("row-highlight");
+            // Forzar reflow para reiniciar animación
+            void row.offsetWidth;
+            row.classList.add("row-highlight");
+        }}
+
+        function renderResults(data) {{
+            results.innerHTML = "";
+            if (!data.resultados || data.resultados.length === 0) {{
+                results.innerHTML = '<div class="empty">Sin resultados</div>';
+                results.classList.add("show");
+                return;
+            }}
+            data.resultados.forEach(function (r) {{
+                var a = document.createElement("a");
+                a.className = "item";
+                a.href = "#";
+                var matchLabel = r._match_field ? "(" + r._match_field + ")" : "";
+                a.innerHTML =
+                    '<span class="num">' + esc(r.numero_expediente) + '</span>' +
+                    '<span class="tipo"> · ' + esc(r.tipo_plano || "?") + '</span>' +
+                    '<span class="estado">' + esc(r.estado_actual || "?") + '</span>' +
+                    '<br>' +
+                    '<span class="cli">' + esc(r.nombre_cliente || "(sin cliente)") + '</span>' +
+                    '<span class="match"> ' + esc(matchLabel) + '</span>';
+                a.addEventListener("click", function (ev) {{
+                    ev.preventDefault();
+                    results.classList.remove("show");
+                    box.value = "";
+                    highlightRow(r.numero_expediente);
+                }});
+                results.appendChild(a);
+            }});
+            results.classList.add("show");
+        }}
+
+        function doSearch(q) {{
+            if (q === lastQuery) return;
+            lastQuery = q;
+            if (q.length < 2) {{
+                results.classList.remove("show");
+                results.innerHTML = "";
+                return;
+            }}
+            fetch("/api/search?q=" + encodeURIComponent(q) + "&limit=15")
+                .then(function (r) {{ return r.json(); }})
+                .then(renderResults)
+                .catch(function () {{
+                    results.innerHTML = '<div class="err">Error en búsqueda</div>';
+                    results.classList.add("show");
+                }});
+        }}
+
+        box.addEventListener("input", function () {{
+            var q = box.value.trim();
+            if (debounceTimer) clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(function () {{ doSearch(q); }}, 200);
+        }});
+
+        // ESC limpia y cierra
+        box.addEventListener("keydown", function (ev) {{
+            if (ev.key === "Escape") {{
+                box.value = "";
+                results.classList.remove("show");
+                lastQuery = "";
+            }}
+        }});
+
+        // Click fuera cierra el dropdown
+        document.addEventListener("click", function (ev) {{
+            if (!ev.target.closest("#search-wrap")) {{
+                results.classList.remove("show");
+            }}
+        }});
+
+        // Si la URL tiene #row-<num>, hacer highlight al cargar
+        if (window.location.hash.indexOf("#row-") === 0) {{
+            var num = decodeURIComponent(window.location.hash.slice(5));
+            setTimeout(function () {{ highlightRow(num); }}, 100);
+        }}
     }})();
 
     // ─── SSE client (U-04 paso 6) ──────────────────────────────────────
