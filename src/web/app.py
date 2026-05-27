@@ -473,6 +473,69 @@ def create_app() -> Flask:
         result = _es.mark_up(DATABASE_PATH, service, reason=reason)
         return jsonify(result)
 
+    # ──────────────────── Búsqueda global (Sprint 5 / N-07) ────────────
+
+    @app.route("/api/search", methods=["GET"])
+    def api_search():
+        """Búsqueda fuzzy sobre expedientes.
+
+        Query params:
+          q     — string a buscar (≥2 chars). Si <2, devuelve [].
+          limit — máximo de resultados (default 20, máx 100).
+
+        Devuelve JSON:
+          {
+            "query": "<q>",
+            "count": N,
+            "resultados": [
+              {"id": ..., "numero_expediente": ..., "estado_actual": ...,
+               "tipo_plano": ..., "nombre_cliente": ...,
+               "_score": 100, "_match_field": "numero_expediente"},
+              ...
+            ]
+          }
+
+        Plan: PLAN_MEJORAS Sprint 5 / N-07.
+        """
+        from config.settings import DATABASE_PATH
+        from src.core.credential_manager import CredentialManager
+        from src.core.database import Database
+
+        q = (request.args.get("q") or "").strip()
+        try:
+            limit = max(1, min(100, int(request.args.get("limit") or 20)))
+        except ValueError:
+            limit = 20
+
+        if len(q) < 2:
+            return jsonify({"query": q, "count": 0, "resultados": []})
+
+        try:
+            db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+            resultados = db.buscar_expedientes(q, limit=limit)
+        except Exception as exc:
+            log.exception("/api/search falló")
+            return jsonify({"error": str(exc)[:200]}), 500
+
+        # Recortar campos para no transferir metadata_json completo
+        # (puede ser grande y el frontend solo necesita lo del card).
+        slim = []
+        for r in resultados:
+            slim.append({
+                "id":                  r.get("id"),
+                "numero_expediente":   r.get("numero_expediente"),
+                "tipo_plano":          r.get("tipo_plano"),
+                "estado_actual":       r.get("estado_actual"),
+                "nombre_cliente":      r.get("nombre_cliente"),
+                "nombre_topografo":    r.get("nombre_topografo"),
+                "fecha_actualizacion": r.get("fecha_actualizacion"),
+                "completado":          r.get("completado"),
+                "cancelado":           r.get("cancelado"),
+                "_score":              r.get("_score"),
+                "_match_field":        r.get("_match_field"),
+            })
+        return jsonify({"query": q, "count": len(slim), "resultados": slim})
+
     # ──────────────────── APT sync status (Sprint 2 / O-06) ────────────
     # Visibilidad operativa: el operador necesita saber si apt-sync-estados
     # está corriendo OK, sin tener que mirar logs.

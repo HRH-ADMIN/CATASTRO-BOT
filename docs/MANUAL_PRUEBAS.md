@@ -1959,3 +1959,156 @@ Esperado: vacío (o falsos positivos como números de expediente con 9 dígitos)
    ajustar el patrón o agregar excepciones.
 
 ---
+
+## N-07 — Búsqueda global en dashboard
+
+**Sprint:** 5
+**Fecha de implementación:** 2026-05-27
+**Branch:** `sprint-5/n-07-busqueda-global`
+
+### Qué hace
+
+Caja de búsqueda en el header del dashboard. Tipear ≥2 caracteres
+dispara `GET /api/search?q=...`. Resultados aparecen como dropdown
+debajo de la caja. Click en un resultado:
+
+- **Si la fila está visible** en la tabla actual → scroll suave +
+  highlight amarillo de 2s.
+- **Si la fila no está visible** (filtros, paginación) → navega a `/`
+  con anchor `#row-<numero>` y al cargar hace highlight.
+
+Busca con LIKE %q% (case-insensitive) en:
+
+| Campo | Score |
+|---|---|
+| `numero_expediente` | 100 |
+| `nombre_cliente` | 80 |
+| `telefono_cliente` | 70 |
+| `cedula_topografo` | 60 |
+| `nombre_topografo` | 50 |
+| `tipo_plano` | 30 |
+| `municipalidad` | 20 |
+| `metadata_json` (incluye apt_tramite, proyecto, distrito, …) | 10 |
+
+Orden de resultados: `_score DESC, fecha_actualizacion DESC`.
+
+### Procedimiento
+
+#### 1) Search por número de expediente
+
+1. Abrir `http://localhost:9224/`.
+2. Click en la caja "🔍 Buscar expediente, cliente, trámite APT…".
+3. Tipear `RDF-2026` (o cualquier prefijo válido).
+4. Verificar que aparece un dropdown con resultados, cada uno mostrando:
+   - Número en azul
+   - Tipo de plano
+   - Estado (badge)
+   - Nombre del cliente
+   - Etiqueta del campo donde matcheó (ej. `(numero_expediente)`)
+5. Click en un resultado → la fila correspondiente se highlightea en
+   amarillo durante 2 segundos y el browser hace scroll.
+
+#### 2) Search por trámite APT (vía metadata)
+
+```
+Tipear: 1258460
+```
+
+Esperado: aparece el expediente que tiene ese trámite, con tag
+`(metadata)`.
+
+#### 3) Search por cliente
+
+```
+Tipear: María
+```
+
+Esperado: aparecen todos los expedientes con "María" en el nombre
+del cliente. Tag `(nombre_cliente)`.
+
+#### 4) Search por teléfono
+
+```
+Tipear: 8888 8888
+```
+
+Esperado: aparece el expediente con ese teléfono. Tag
+`(telefono_cliente)`.
+
+#### 5) Endpoint REST directo
+
+```powershell
+curl "http://localhost:9224/api/search?q=RDF&limit=5" | python -m json.tool
+```
+
+Esperado:
+```json
+{
+  "query": "RDF",
+  "count": 3,
+  "resultados": [
+    {
+      "id": "...",
+      "numero_expediente": "RDF-2026-001",
+      "tipo_plano": "rectificacion",
+      "estado_actual": "RECIBIDO",
+      "nombre_cliente": "María del Carmen",
+      ...,
+      "_score": 100,
+      "_match_field": "numero_expediente"
+    },
+    ...
+  ]
+}
+```
+
+#### 6) Edge cases
+
+- **Query vacío** (`""`) → 200 con `count: 0, resultados: []`.
+- **Query de 1 char** (`"a"`) → 200 con `count: 0`. (Evita ruido y carga inútil.)
+- **Sin matches** → `count: 0`.
+- **ESC en la caja** → limpia y cierra dropdown.
+- **Click fuera del search-wrap** → cierra dropdown.
+
+### Criterios de aceptación
+
+- [x] Caja de búsqueda visible en el header del dashboard.
+- [x] ≥2 chars dispara `/api/search` con debounce de 200ms.
+- [x] Resultados se muestran como dropdown con score + campo de match.
+- [x] Click en resultado hace scroll + highlight de la fila.
+- [x] Si la fila no está en la tabla actual, recarga `/#row-<numero>`.
+- [x] Endpoint REST `/api/search?q=&limit=` funciona standalone.
+- [x] Slim response (sin metadata_json completo, solo campos del card).
+- [x] Limit capeado a 100.
+- [x] Cancelados excluidos por default.
+- [x] Backward-compat: `whatsapp_commands` sigue funcionando con
+      `max_resultados=N`.
+- [x] Tests: **20 nuevos** (10 helper Database + 8 endpoint + 2 frontend smoke).
+
+### Tests automatizados relacionados
+
+| Archivo | Tests | Cubre |
+|---|---|---|
+| `test_search.py` | 20 | Helper Database, endpoint REST, frontend smoke |
+
+### Limitaciones conocidas
+
+1. **LIKE %q% no es full-text.** Búsquedas como "robles San Pedro"
+   NO matchean si el texto en BD es "lote 12 los robles, San Pedro,
+   Alajuela" (porque LIKE %robles San Pedro% busca el match exacto
+   contiguo). Para esto haría falta FTS5. Por ahora el operador
+   busca una palabra a la vez.
+2. **Case-sensitive en tildes.** SQLite LIKE es case-insensitive
+   solo para ASCII. `"maría"` matchea `"María"` solo si las dos están
+   sin tilde o con el mismo caso. Workaround: el operador tipea sin
+   tildes y los datos también suelen estar sin tildes.
+3. **Sin sugerencias / fuzzy match.** Si tipeás "Peres" no encuentra
+   "Pérez". Para esto necesitaríamos Levenshtein o un índice trigram.
+4. **No persiste búsquedas recientes.** Si abres la caja, no muestra
+   historial. Próxima iteración: localStorage con últimas 10 búsquedas.
+5. **Backend filtra cancelados** por default (consistente con
+   listar_expedientes). Para incluirlos usar
+   `db.buscar_expedientes(q, incluir_cancelados=True)`. El endpoint
+   `/api/search` no expone ese param todavía.
+
+---

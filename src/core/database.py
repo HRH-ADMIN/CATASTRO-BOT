@@ -797,6 +797,93 @@ class Database:
         with self.connect() as conn:
             return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
+    def buscar_expedientes(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        max_resultados: Optional[int] = None,
+        incluir_cancelados: bool = False,
+    ) -> list[dict]:
+        """Búsqueda fuzzy sobre expedientes (Sprint 5 / N-07).
+
+        `max_resultados` es alias retro-compatible de `limit` (usado por
+        callers antiguos en whatsapp_commands.py).
+
+        Matchea LIKE %query% (case-insensitive) en:
+          - numero_expediente
+          - nombre_cliente
+          - nombre_topografo
+          - cedula_topografo
+          - telefono_cliente
+          - tipo_plano
+          - municipalidad
+          - metadata_json (cubre apt_tramite, proyecto, distrito,
+                          propietarios, dirección, etc. — todo lo que
+                          el bot guarda como JSON freeform)
+
+        Ordena por score: matches en numero_expediente pesan más, después
+        nombre_cliente, después metadata. Empate por fecha_actualizacion DESC.
+
+        Devuelve list[dict] con shape habitual de expediente + campo
+        extra `_match_field` indicando dónde matcheó (primer match).
+
+        Si `query` es vacío o tiene <2 chars, devuelve [].
+        """
+        q = (query or "").strip()
+        if len(q) < 2:
+            return []
+        # Alias retro-compat: max_resultados gana si fue pasado explícitamente
+        if max_resultados is not None:
+            limit = max_resultados
+        like = f"%{q}%"
+        # SQLite LIKE es case-insensitive por defecto para ASCII (BINARY collation)
+        # — para tildes usaríamos LOWER() + LOWER(), pero la mayoría de búsquedas
+        # son ASCII (números, dígitos, nombres sin tildes).
+        sql = """
+            SELECT *,
+                CASE
+                    WHEN numero_expediente LIKE ?         THEN 100
+                    WHEN nombre_cliente LIKE ?            THEN 80
+                    WHEN telefono_cliente LIKE ?          THEN 70
+                    WHEN cedula_topografo LIKE ?          THEN 60
+                    WHEN nombre_topografo LIKE ?          THEN 50
+                    WHEN tipo_plano LIKE ?                THEN 30
+                    WHEN municipalidad LIKE ?             THEN 20
+                    WHEN metadata_json LIKE ?             THEN 10
+                    ELSE 0
+                END AS _score,
+                CASE
+                    WHEN numero_expediente LIKE ? THEN 'numero_expediente'
+                    WHEN nombre_cliente LIKE ?    THEN 'nombre_cliente'
+                    WHEN telefono_cliente LIKE ? THEN 'telefono_cliente'
+                    WHEN cedula_topografo LIKE ? THEN 'cedula_topografo'
+                    WHEN nombre_topografo LIKE ? THEN 'nombre_topografo'
+                    WHEN tipo_plano LIKE ?        THEN 'tipo_plano'
+                    WHEN municipalidad LIKE ?    THEN 'municipalidad'
+                    WHEN metadata_json LIKE ?    THEN 'metadata'
+                    ELSE NULL
+                END AS _match_field
+            FROM expedientes
+            WHERE (numero_expediente LIKE ?
+               OR nombre_cliente LIKE ?
+               OR telefono_cliente LIKE ?
+               OR cedula_topografo LIKE ?
+               OR nombre_topografo LIKE ?
+               OR tipo_plano LIKE ?
+               OR municipalidad LIKE ?
+               OR metadata_json LIKE ?)
+        """
+        if not incluir_cancelados:
+            sql += "  AND cancelado = 0\n"
+        sql += """
+            ORDER BY _score DESC, fecha_actualizacion DESC
+            LIMIT ?
+        """
+        args = [like] * 16 + [like] * 8 + [limit]
+        with self.connect() as conn:
+            return [dict(r) for r in conn.execute(sql, args).fetchall()]
+
     def cambiar_estado(
         self,
         expediente_id: str,
@@ -1061,30 +1148,10 @@ class Database:
                     return d
         return None
 
-    def buscar_expedientes(
-        self,
-        texto: str,
-        *,
-        max_resultados: int = 15,
-    ) -> list[dict]:
-        """Búsqueda por número de expediente, nombre de topógrafo o cliente.
-
-        No incluye expedientes cancelados. Devuelve hasta `max_resultados`
-        ordenados por fecha de actualización descendente.
-        """
-        pat = f"%{texto}%"
-        sql = """
-            SELECT * FROM expedientes
-             WHERE (   numero_expediente LIKE ?
-                    OR nombre_topografo  LIKE ?
-                    OR nombre_cliente    LIKE ?)
-               AND cancelado = 0
-             ORDER BY fecha_actualizacion DESC
-             LIMIT ?
-        """
-        with self.connect() as conn:
-            return [dict(r) for r in
-                    conn.execute(sql, (pat, pat, pat, max_resultados)).fetchall()]
+    # NOTA: la implementación productiva de `buscar_expedientes` está
+    # arriba (Sprint 5 / N-07) con scoring y match_field. Esta es solo
+    # un placeholder histórico — los callers viejos usaban
+    # `max_resultados`, ahora redireccionamos al método nuevo.
 
     # ---------- archivos ----------
 
