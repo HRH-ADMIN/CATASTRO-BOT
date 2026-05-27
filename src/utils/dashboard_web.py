@@ -1103,6 +1103,23 @@ def _render_html(refresh_sec: int = 30) -> str:
         0%, 100% {{ opacity: 1; }}
         50% {{ opacity: 0.4; }}
     }}
+    /* Chip APT sync (O-06) */
+    #apt-sync-chip {{
+        display: inline-flex; align-items: center; gap: 6px;
+        font-size: 12px; padding: 3px 10px; border-radius: 12px;
+        background: #1e293b; color: #94a3b8;
+        cursor: help;
+    }}
+    #apt-sync-chip::before {{
+        content: ""; width: 8px; height: 8px; border-radius: 50%;
+        background: #6b7280;
+    }}
+    #apt-sync-chip.ok::before    {{ background: #10b981; }}
+    #apt-sync-chip.stale::before {{ background: #f59e0b; }}
+    #apt-sync-chip.down::before  {{ background: #ef4444; }}
+    #apt-sync-chip.ok    {{ color: #34d399; }}
+    #apt-sync-chip.stale {{ color: #fbbf24; }}
+    #apt-sync-chip.down  {{ color: #f87171; }}
     /* Flash visual cuando una fila se actualiza por SSE */
     tr.row-flash {{
         animation: row-flash-anim 1.2s ease-out;
@@ -1124,6 +1141,10 @@ def _render_html(refresh_sec: int = 30) -> str:
             Total expedientes: <strong>{len(exps)}</strong> &nbsp;|&nbsp;
             <span id="live-status" title="Estado de la conexión live (SSE)">
                 <span id="live-status-text">conectando…</span>
+            </span>
+            &nbsp;|&nbsp;
+            <span id="apt-sync-chip" title="Estado del job apt-sync-estados (cada 30 min)">
+                <span id="apt-sync-chip-text">APT sync: …</span>
             </span>
             &nbsp;|&nbsp;
             <a href="/config/control" style="color:#60a5fa">⚙️ Control</a>
@@ -1208,6 +1229,77 @@ def _render_html(refresh_sec: int = 30) -> str:
         loadStatus();
         setInterval(loadStatus, 30000);  // refresh polling cada 30s
         window._extServicesReload = loadStatus;  // expose para SSE
+    }})();
+
+    // ─── Chip APT sync (Sprint 2 / O-06) ───────────────────────────────
+    // Polletea /api/apt-sync-status cada 60s y refleja el resultado en el
+    // chip del header. 4 estados:
+    //   ok    → último éxito hace <2h, todo en orden
+    //   stale → último éxito entre 2h y 24h, advertir pero no alarmar
+    //   down  → último evento fue failed/skipped, requiere atención
+    //   unknown → sin datos aún (bot recién arrancado)
+    (function () {{
+        var chip = document.getElementById("apt-sync-chip");
+        var txt = document.getElementById("apt-sync-chip-text");
+        if (!chip || !txt) return;
+
+        function fmtHaceCuanto(ts) {{
+            if (!ts) return "?";
+            try {{
+                var then = new Date(ts);
+                var diffMin = Math.floor((Date.now() - then.getTime()) / 60000);
+                if (diffMin < 1) return "ahora";
+                if (diffMin < 60) return "hace " + diffMin + " min";
+                var diffH = Math.floor(diffMin / 60);
+                if (diffH < 48) return "hace " + diffH + "h";
+                return "hace " + Math.floor(diffH / 24) + " días";
+            }} catch (e) {{
+                return "?";
+            }}
+        }}
+
+        function loadAptSync() {{
+            fetch("/api/apt-sync-status")
+                .then(function (r) {{ return r.json(); }})
+                .then(function (data) {{
+                    chip.classList.remove("ok", "stale", "down");
+                    var status = data.status || "unknown";
+                    if (status === "ok") {{
+                        chip.classList.add("ok");
+                        var ts = data.ultimo_ok && data.ultimo_ok.timestamp;
+                        txt.textContent = "APT sync: OK " + fmtHaceCuanto(ts);
+                        chip.title = "Última corrida exitosa de apt-sync-estados " + fmtHaceCuanto(ts);
+                    }} else if (status === "stale") {{
+                        chip.classList.add("stale");
+                        var ts2 = data.ultimo_ok && data.ultimo_ok.timestamp;
+                        txt.textContent = "APT sync: lenta (" + fmtHaceCuanto(ts2) + ")";
+                        chip.title = "El último éxito de apt-sync fue " + fmtHaceCuanto(ts2) + " — Chrome del bot puede estar caído.";
+                    }} else if (status === "down") {{
+                        chip.classList.add("down");
+                        var fallo = data.ultimo_fallo || data.ultimo_skip_cdp;
+                        var motivo = "";
+                        if (fallo && fallo.detalles_json) {{
+                            try {{
+                                var d = JSON.parse(fallo.detalles_json);
+                                motivo = d.motivo || d.msg || d.error || "";
+                            }} catch (e) {{ motivo = ""; }}
+                        }}
+                        txt.textContent = "APT sync: caído";
+                        chip.title = "Último fallo: " + (motivo || "(sin detalle)") +
+                                     "\\nHora: " + (fallo && fallo.timestamp || "?");
+                    }} else {{
+                        txt.textContent = "APT sync: sin datos";
+                        chip.title = "Aún no se ha ejecutado apt-sync-estados desde el último reinicio.";
+                    }}
+                }})
+                .catch(function () {{
+                    chip.classList.remove("ok", "stale", "down");
+                    txt.textContent = "APT sync: ?";
+                }});
+        }}
+
+        loadAptSync();
+        setInterval(loadAptSync, 60000);  // 1 min — el job corre cada 30 min
     }})();
 
     // ─── Link de revisiones pendientes (N-02) ──────────────────────────

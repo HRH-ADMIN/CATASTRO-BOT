@@ -635,17 +635,50 @@ def _sync_apt_estados(orchestrator: "Orchestrator") -> None:
     import json as _json
     try:
         from src.agents.apt_agent import APTAgent  # noqa: PLC0415
-    except Exception:
+    except Exception as exc:
+        _log.warning("apt-sync-estados: no se pudo importar APTAgent: %s", exc)
+        try:
+            orchestrator.db.registrar_evento(
+                "apt_sync_failed",
+                detalles={"error": "import_apt_agent",
+                          "type": type(exc).__name__,
+                          "msg": str(exc)[:500]},
+                actor="scheduler.apt_sync",
+            )
+        except Exception:
+            pass
         return
 
     try:
         agent = APTAgent(orchestrator.db, orchestrator.credentials)
     except Exception as exc:
         _log.warning("apt-sync-estados: no se pudo crear APTAgent: %s", exc)
+        try:
+            orchestrator.db.registrar_evento(
+                "apt_sync_failed",
+                detalles={"error": "create_apt_agent",
+                          "type": type(exc).__name__,
+                          "msg": str(exc)[:500]},
+                actor="scheduler.apt_sync",
+            )
+        except Exception:
+            pass
         return
 
     if not agent._cdp_disponible():
+        # Skip silencioso de cara al usuario — fuera de oficina es esperado
+        # que Chrome no esté corriendo. Pero dejamos rastro en audit_log
+        # para que el widget del dashboard pueda mostrar "última vez OK
+        # hace Xh" vs "CDP caído desde hace Yh".
         _log.debug("apt-sync-estados: CDP no disponible — skip")
+        try:
+            orchestrator.db.registrar_evento(
+                "apt_sync_skipped_cdp",
+                detalles={"motivo": "CDP no responde en localhost:9222"},
+                actor="scheduler.apt_sync",
+            )
+        except Exception:
+            pass
         return
 
     # Estados terminales — no es necesario re-consultar
@@ -653,6 +686,7 @@ def _sync_apt_estados(orchestrator: "Orchestrator") -> None:
 
     actualizados = 0
     cambios = 0
+    errores_por_exp: list[dict] = []  # acumula errores por-expediente (no fatales)
     try:
         with orchestrator.db.connect() as conn:
             rows = list(conn.execute(
@@ -661,6 +695,17 @@ def _sync_apt_estados(orchestrator: "Orchestrator") -> None:
             ).fetchall())
     except Exception as exc:
         _log.warning("apt-sync-estados: error leyendo BD: %s", exc)
+        try:
+            orchestrator.db.registrar_evento(
+                "apt_sync_failed",
+                detalles={"error": "leer_expedientes",
+                          "type": type(exc).__name__,
+                          "msg": str(exc)[:500]},
+                actor="scheduler.apt_sync",
+            )
+        except Exception:
+            pass
+        _notificar_sync_caido(orchestrator.db, "Error leyendo BD: " + str(exc)[:120])
         return
 
     for r in rows:
@@ -679,6 +724,11 @@ def _sync_apt_estados(orchestrator: "Orchestrator") -> None:
             estado_nuevo = agent.consultar_estado(r["id"])
         except Exception as exc:
             _log.warning("apt-sync %s: error: %s", r["numero_expediente"], exc)
+            errores_por_exp.append({
+                "expediente": r["numero_expediente"],
+                "type": type(exc).__name__,
+                "msg": str(exc)[:200],
+            })
             continue
 
         if not estado_nuevo:
@@ -728,6 +778,61 @@ def _sync_apt_estados(orchestrator: "Orchestrator") -> None:
     _log.info(
         "apt-sync-estados: %d sincronizados, %d con cambios", actualizados, cambios
     )
+
+    # Audit final — success (con o sin errores por-expediente, mientras el
+    # job haya podido correr hasta el final).
+    try:
+        if errores_por_exp:
+            orchestrator.db.registrar_evento(
+                "apt_sync_partial",
+                detalles={
+                    "actualizados": actualizados,
+                    "cambios": cambios,
+                    "errores": errores_por_exp[:20],  # cap
+                    "total_errores": len(errores_por_exp),
+                },
+                actor="scheduler.apt_sync",
+            )
+        else:
+            orchestrator.db.registrar_evento(
+                "apt_sync_success",
+                detalles={
+                    "actualizados": actualizados,
+                    "cambios": cambios,
+                    "total_revisados": len(rows),
+                },
+                actor="scheduler.apt_sync",
+            )
+    except Exception:
+        pass
+
+
+def _notificar_sync_caido(db, mensaje: str) -> None:
+    """Lanza un toast al escritorio cuando apt-sync falla, pero solo si la
+    última vez fue OK — evita spam cada 30 min mientras Chrome esté caído.
+
+    Anti-spam: si ya hay un `apt_sync_failed` reciente (< 4h), no notifica.
+    """
+    try:
+        ultimo_fail = db.ultimo_evento("apt_sync_failed")
+        if ultimo_fail:
+            from datetime import datetime, timedelta, timezone
+            try:
+                ts = datetime.fromisoformat(ultimo_fail["timestamp"])
+                # _now_iso() guarda UTC con tz — comparar tz-aware.
+                ahora = datetime.now(timezone.utc) if ts.tzinfo else datetime.now()
+                if ahora - ts < timedelta(hours=4):
+                    return  # ya notificado recientemente
+            except Exception:
+                pass
+        from src.utils.desktop_notify import notificar_escritorio
+        notificar_escritorio(
+            titulo="catastro-bot — APT sync falló",
+            mensaje=mensaje,
+            urgencia="normal",
+        )
+    except Exception:
+        pass
 
 
 def register_jobs(

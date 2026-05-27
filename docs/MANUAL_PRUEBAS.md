@@ -946,3 +946,169 @@ directamente desde una shell de Python con el orchestrator vivo.
    Próxima iteración: job que comprime las >90 días.
 
 ---
+
+## O-06 — Audit log de fallos en `apt-sync-estados`
+
+**Sprint:** 2
+**Fecha de implementación:** 2026-05-27
+**Branch:** `sprint-2/o-06-audit-log-apt-sync`
+
+### Qué hace
+
+Antes: el job `apt-sync-estados` (cada 30 min) que consulta el portal APT
+hacía **skip silencioso** cuando Chrome del bot no respondía en CDP, o
+cuando había errores. El operador NO tenía manera de saber si el job se
+estaba ejecutando OK sin abrir los logs.
+
+Ahora: cada corrida deja rastro inmutable en `audit_log`:
+
+| Acción | Cuándo se emite |
+|---|---|
+| `apt_sync_success` | Ciclo completo sin errores por-expediente |
+| `apt_sync_partial` | Ciclo completo pero algunos expedientes erroraron al consultar |
+| `apt_sync_failed` | No pudo correr (BD, import APTAgent, constructor) |
+| `apt_sync_skipped_cdp` | CDP no responde — esperado fuera de oficina |
+
+Además:
+- **Chip en el header del dashboard** muestra `APT sync: OK hace X min` /
+  `lenta` / `caído` con tooltip con el motivo del último fallo.
+- **Toast al escritorio** cuando `_notificar_sync_caido` detecta fallo,
+  con anti-spam de 4h (no spammea si ya hubo un fail reciente).
+
+### Procedimiento
+
+#### 1) Verificar el chip del dashboard
+
+1. Arrancar el bot: `python -m src.main`
+2. Abrir `http://localhost:9224/`
+3. Verificar que en el header aparece un chip con punto de color:
+   - Verde = `APT sync: OK hace X min`
+   - Naranja = `APT sync: lenta (hace Xh)` (último éxito hace 2-24h)
+   - Rojo = `APT sync: caído` con tooltip explicando el motivo
+   - Gris = `APT sync: sin datos` (nunca corrió todavía)
+
+#### 2) Forzar un evento de fallo (con BD productiva)
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os; os.environ['CATASTRO_BOT_DEV_MODE']='1'
+from src.core.credential_manager import CredentialManager
+from src.core.database import Database
+from config.settings import DATABASE_PATH
+db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+db.registrar_evento('apt_sync_failed', detalles={'motivo': 'test manual'},
+                    actor='manual-test')
+print('Evento insertado')
+"
+```
+
+Recargar el dashboard → chip debe volverse rojo (`APT sync: caído`).
+Hover sobre el chip → tooltip debe decir "Último fallo: test manual".
+
+#### 3) Verificar endpoint REST
+
+```powershell
+curl http://localhost:9224/api/apt-sync-status | python -m json.tool
+```
+
+Esperado:
+```json
+{
+  "status": "down",
+  "ultimo_ok": null,
+  "ultimo_fallo": {
+    "timestamp": "2026-05-27T...",
+    "actor": "manual-test",
+    "accion": "apt_sync_failed",
+    "detalles_json": "{\"motivo\": \"test manual\"}",
+    ...
+  }
+}
+```
+
+#### 4) Forzar evento exitoso
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os; os.environ['CATASTRO_BOT_DEV_MODE']='1'
+from src.core.credential_manager import CredentialManager
+from src.core.database import Database
+from config.settings import DATABASE_PATH
+db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+db.registrar_evento('apt_sync_success',
+                    detalles={'actualizados': 5, 'cambios': 1, 'total_revisados': 12},
+                    actor='manual-test')
+print('Evento success insertado')
+"
+```
+
+Recargar dashboard → chip vuelve a verde.
+
+#### 5) Verificar audit_log inmutable
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os; os.environ['CATASTRO_BOT_DEV_MODE']='1'
+from src.core.credential_manager import CredentialManager
+from src.core.database import Database
+from config.settings import DATABASE_PATH
+db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+print('Cadena audit_log verificada:', db.verify_audit_chain(), 'filas')
+"
+```
+
+Esperado: sin lanzar excepción y cuenta >= eventos insertados.
+
+#### 6) Verificar anti-spam de notificación al escritorio
+
+Ejecutar 2 veces seguidas (separadas por menos de 4h):
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os; os.environ['CATASTRO_BOT_DEV_MODE']='1'
+from src.core.credential_manager import CredentialManager
+from src.core.database import Database
+from src.scheduler.tasks import _notificar_sync_caido
+from config.settings import DATABASE_PATH
+db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+_notificar_sync_caido(db, 'Test toast 1')
+_notificar_sync_caido(db, 'Test toast 2')  # NO debe aparecer
+"
+```
+
+Esperado: solo el primer toast aparece en el escritorio.
+
+### Criterios de aceptación
+
+- [x] `apt-sync-estados` deja rastro en `audit_log` en TODAS las salidas
+      (success/partial/failed/skipped_cdp).
+- [x] Endpoint `/api/apt-sync-status` devuelve status derivado
+      (ok/stale/down/unknown).
+- [x] Chip del header muestra estado actual + tooltip con detalle.
+- [x] `_notificar_sync_caido` tiene anti-spam de 4h.
+- [x] Cadena de hashes del audit_log se mantiene válida después de los
+      inserts vía `registrar_evento`.
+- [x] Tests: **14 nuevos** (5 registrar_evento + 3 sync flow + 2 antispam + 4 endpoint).
+
+### Tests automatizados relacionados
+
+| Archivo | Tests | Cubre |
+|---|---|---|
+| `test_apt_sync_audit.py` | 14 | API pública audit, flow scheduler, anti-spam, endpoint |
+
+### Limitaciones conocidas
+
+1. **Toast solo en Windows.** El fallback de `notificar_escritorio` usa
+   MessageBox/PowerShell — no funciona en headless Linux.
+2. **Anti-spam de 4h es global.** Si el operador soluciona el problema
+   y vuelve a romperse en <4h, no recibe nuevo toast (pero sí ve el chip
+   rojo en el dashboard).
+3. **Status `stale` no genera notificación.** Solo `down` toca toast.
+   La idea es que `stale` (entre 2h y 24h) es advertencia, no urgencia.
+4. **El `apt_sync_skipped_cdp` cuenta como evento "down".** Es
+   intencional para el chip — pero el operador puede argumentar que
+   "skip CDP fuera de oficina" no debería marcar el chip rojo a las
+   8am. Si molesta, cambiar la lógica en `/api/apt-sync-status` para
+   ignorar skips en horario nocturno.
+
+---
