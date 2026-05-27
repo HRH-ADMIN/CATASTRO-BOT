@@ -798,29 +798,71 @@ def _matar_procesos(patrones: list[str]) -> dict:
     return {"ok": not errores, "matados": matados, "errores": errores}
 
 
+def _pythonw_si_existe() -> str:
+    """Devuelve la ruta a pythonw.exe (sin consola) si existe en el venv.
+
+    Windows: python.exe abre una ventana CMD al arrancar; pythonw.exe NO.
+    Para procesos que el dashboard arranca en background (watchdog,
+    chrome bot, scheduler) queremos pythonw.exe para que el operador
+    no vea terminales abrirse ni pueda cerrarlas por accidente.
+
+    En Linux/Mac no existe pythonw; devuelve sys.executable.
+    """
+    if sys.platform != "win32":
+        return sys.executable
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    return str(pythonw) if pythonw.exists() else sys.executable
+
+
 def _lanzar_proceso(modulo_o_script: str, *args, detached: bool = True) -> dict:
-    """Lanza un proceso python en background. Devuelve {ok, pid}."""
+    """Lanza un proceso python en background. Devuelve {ok, pid}.
+
+    En Windows usa pythonw.exe (sin consola) cuando existe y agrega flags
+    CREATE_NO_WINDOW + DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP para
+    garantizar que NO se abra ninguna ventana CMD visible al operador.
+
+    Logs van a logs/<nombre>_stdout.log para que si el proceso crashea o
+    imprime algo el operador pueda diagnosticar (sin esto, pythonw + stdout
+    detached pierde la salida).
+    """
     import subprocess
     try:
+        py = _pythonw_si_existe() if sys.platform == "win32" else sys.executable
         if modulo_o_script.startswith("-m "):
-            cmd = [sys.executable, "-m", modulo_o_script[3:]] + list(args)
+            cmd = [py, "-m", modulo_o_script[3:]] + list(args)
+            log_tag = modulo_o_script[3:].replace(".", "_")
         else:
-            cmd = [sys.executable, modulo_o_script] + list(args)
+            cmd = [py, modulo_o_script] + list(args)
+            log_tag = Path(modulo_o_script).stem
         flags = 0
         if detached and sys.platform == "win32":
+            # CREATE_NO_WINDOW (0x08000000) — clave para que NO aparezca
+            # ninguna consola, incluso si por algun motivo el subprocess
+            # decide crear una.
+            CREATE_NO_WINDOW = 0x08000000
             flags = (
                 getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 | getattr(subprocess, "DETACHED_PROCESS", 0)
+                | CREATE_NO_WINDOW
             )
+        # Redirigir stdout/stderr a archivo de log dedicado por proceso.
+        # Si no se puede abrir el log, fallback a DEVNULL.
+        log_dir = ROOT / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"proc_{log_tag}.log"
+        try:
+            log_fh = open(log_path, "a", encoding="utf-8", buffering=1)
+        except Exception:
+            log_fh = subprocess.DEVNULL
         proc = subprocess.Popen(
             cmd,
             creationflags=flags,
             close_fds=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=log_fh,
             cwd=str(ROOT),
         )
-        return {"ok": True, "pid": proc.pid}
+        return {"ok": True, "pid": proc.pid, "log": str(log_path)}
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:200]}
 
