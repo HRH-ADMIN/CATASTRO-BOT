@@ -281,6 +281,31 @@ INSERT OR IGNORE INTO api_budget (id, monthly_usd, alert_threshold)
 -- intenta restaurar; si recibe OK, marca 'up' de nuevo.
 --
 -- Plan: PLAN_MEJORAS Sprint 4 / N-03.
+-- ── Replicación externa del hash root del audit_log (Sprint 2 / N-10) ─────
+-- Cada noche, después de `audit-verify` exitoso, replicamos el hash del
+-- último registro del audit_log a dos destinos independientes:
+--   1. Email al topógrafo (subject incluye el hash).
+--   2. Append a archivo audit_roots.txt en Drive.
+-- Esto permite detectar tampering retroactivo: si un atacante modifica
+-- la BD local y "ajusta" todos los hashes, el operador puede comparar
+-- contra los hashes externos y detectar la divergencia.
+--
+-- `destinos_json` guarda qué destinos respondieron OK en ese intento.
+-- `ok=1` requiere al menos 1 destino exitoso (si los 2 fallan, ok=0
+-- y el operador debería revisar).
+--
+-- Plan: PLAN_MEJORAS Sprint 2 / N-10.
+CREATE TABLE IF NOT EXISTS audit_root_replicas (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp       TEXT NOT NULL,            -- ISO UTC del intento
+    root_hash       TEXT NOT NULL,            -- hash_actual del último audit_log
+    audit_log_id    INTEGER NOT NULL,         -- id de la fila replicada
+    destinos_json   TEXT NOT NULL,            -- JSON {email: bool|str, drive: bool|str}
+    ok              INTEGER NOT NULL DEFAULT 1 CHECK (ok IN (0,1))
+);
+CREATE INDEX IF NOT EXISTS idx_audit_root_replicas_ts
+    ON audit_root_replicas(timestamp);
+
 -- ── Historial de alertas (Sprint 2 / O-05) ───────────────────────────────────
 -- Una fila por (expediente, tipo_alerta). Usada por _stale_alert y futuros
 -- jobs de alertas para implementar "novelty check": no spammear si la

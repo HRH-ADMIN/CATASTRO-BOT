@@ -134,12 +134,60 @@ _BACKUP_KEEP = 14    # días de historial de backups
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 def _verify_audit_safe(orchestrator: "Orchestrator") -> None:
-    """Verifica el audit chain y registra el resultado."""
+    """Verifica el audit chain y, si pasa, dispara replicación externa (N-10).
+
+    El job replica el hash del último audit_log a email + Drive. Idempotente:
+    si el hash no cambió desde la última replicación, no envía de nuevo.
+    """
     try:
         n = orchestrator.db.verify_audit_chain()
         _log.info("audit chain verificado (%s entradas)", n)
     except Exception:
         _log.exception("verificación del audit chain falló")
+        return  # NO replicar si la cadena está rota — sería divulgar tampering
+
+    # ── Sprint 2 / N-10: replicación del hash root ────────────────
+    try:
+        from src.utils import audit_root_replicator as _arr
+        # Drive es opcional — si el bot no está autorizado con Google, skip.
+        drive_agent = _drive_agent_si_disponible(orchestrator)
+        res = _arr.replicar(
+            orchestrator.db,
+            orchestrator.credentials,
+            drive_agent=drive_agent,
+        )
+        if res.get("skipped"):
+            _log.info("audit-root-replicate: skip (hash sin cambios)")
+        else:
+            _log.info(
+                "audit-root-replicate: ok=%s email=%s drive=%s "
+                "(audit_log_id=%s)",
+                res["ok"], res["destinos"]["email"],
+                res["destinos"]["drive"], res["audit_log_id"],
+            )
+    except Exception:
+        _log.exception("audit-root-replicate falló (no fatal)")
+
+
+def _drive_agent_si_disponible(orchestrator: "Orchestrator"):
+    """Devuelve un DriveAgent si Drive está autorizado, o None.
+
+    Evita explotar si el operador nunca corrió `catastro-bot drive autorizar`.
+    """
+    try:
+        from src.agents.drive_agent import DriveAgent
+        agent = DriveAgent(orchestrator.db, orchestrator.credentials)
+        # Probar si hay credenciales válidas — _load_credentials() lanza si no.
+        try:
+            agent._load_credentials()
+            return agent
+        except Exception as exc:
+            _log.info("audit-root: Drive no autorizado (%s) — solo email",
+                      type(exc).__name__)
+            return None
+    except Exception:
+        _log.exception("audit-root: no se pudo crear DriveAgent")
+        return None
 
 
 def _backup_db(orchestrator: "Orchestrator") -> None:
