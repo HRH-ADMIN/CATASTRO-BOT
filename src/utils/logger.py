@@ -123,6 +123,18 @@ def _configure_root() -> None:
     console.setFormatter(formatter)
     root.addHandler(console)
 
+    # ── PII redactor (Sprint 4 / S-08) ───────────────────────────────
+    # Filtro a nivel logger — todos los handlers reciben mensajes ya
+    # redactados (cédulas/teléfonos/emails → placeholders).
+    # Override con CATASTRO_LOG_REDACT_PII=0 para development.
+    try:
+        from src.utils.pii_redactor import install_on_root_logger
+        install_on_root_logger(_ROOT_LOGGER_NAME)
+    except Exception:
+        # Si el import falla por cualquier razón, el logging sigue
+        # funcionando sin redacción — no romper el bot por seguridad.
+        pass
+
     _root_configured = True
 
 
