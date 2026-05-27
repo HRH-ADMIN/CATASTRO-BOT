@@ -1112,3 +1112,177 @@ Esperado: solo el primer toast aparece en el escritorio.
    ignorar skips en horario nocturno.
 
 ---
+
+## O-05 — Novelty check en `_stale_alert`
+
+**Sprint:** 2
+**Fecha de implementación:** 2026-05-27
+**Branch:** `sprint-2/o-05-novelty-stale-alert`
+
+### Qué hace
+
+Antes: el job `stale-alert` (cada 6h) detectaba expedientes activos sin
+actividad > 48h y mandaba **un WhatsApp al admin con la lista entera**.
+Si un expediente quedaba bloqueado 48h, el operador recibía **8 alertas
+en 2 días** (1 cada 6h) aunque nada cambiara.
+
+Ahora: cada expediente tiene un snapshot
+(`estado_actual|tipo_plano|fecha_actualizacion`) que se guarda en la
+nueva tabla `alert_history` cada vez que se alerta. En la próxima
+corrida, se aplica el filtro `_filtrar_stale_por_novedad`:
+
+| Condición | Resultado |
+|---|---|
+| Nunca alertado | Pasa (incluir en mensaje) |
+| Alertado hace <24h **y** snapshot idéntico | **Skip** (suprimir spam) |
+| Alertado hace <24h **pero** snapshot cambió | Pasa (estado cambió, vale alertar) |
+| Alertado hace ≥24h | Pasa (cooldown vencido) |
+
+**Resultado del criterio de aceptación del plan:** un expediente
+bloqueado 48h ahora genera **≤2 alertas** en lugar de 8.
+
+### Procedimiento
+
+#### 1) Forzar alerta inicial (verifica el flujo nuevo)
+
+Pre-requisito: tener al menos 1 expediente con `fecha_actualizacion`
+hace >48h (BD productiva normalmente tiene varios).
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os; os.environ['CATASTRO_BOT_DEV_MODE']='1'
+from src.core.credential_manager import CredentialManager
+from src.core.database import Database
+from src.orchestrator import Orchestrator
+from src.scheduler.tasks import _stale_alert
+from config.settings import DATABASE_PATH
+from unittest.mock import MagicMock
+db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+orch = MagicMock()
+orch.db = db
+orch.whatsapp = MagicMock()
+_stale_alert(orch)
+print('Corrida 1 — WhatsApp invocado:', orch.whatsapp.enviar_mensaje.called)
+print('Argumentos:', orch.whatsapp.enviar_mensaje.call_args)
+"
+```
+
+Esperado: imprime `True` y el mensaje contiene la lista de bloqueados.
+
+#### 2) Segunda corrida inmediata (verifica supresión)
+
+Re-ejecutar el comando anterior **sin cambiar nada**. Esperado:
+
+```
+Corrida 1 — WhatsApp invocado: False
+```
+
+Eso prueba el novelty check: como nada cambió y se alertó hace <24h, NO
+se vuelve a notificar.
+
+#### 3) Inspeccionar alert_history
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os; os.environ['CATASTRO_BOT_DEV_MODE']='1'
+from src.core.credential_manager import CredentialManager
+from src.core.database import Database
+from config.settings import DATABASE_PATH
+db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+for row in db.alert_history_listar(alert_type='stale_48h')[:10]:
+    print(row['expediente_id'], '→', row['last_sent_at'],
+          '|', row['last_state_snapshot'][:60])
+"
+```
+
+Esperado: una fila por cada expediente notificado en el paso 1.
+
+#### 4) Simular paso de 24h (debe re-alertar)
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os; os.environ['CATASTRO_BOT_DEV_MODE']='1'
+from datetime import datetime, timedelta, timezone
+from src.core.credential_manager import CredentialManager
+from src.core.database import Database
+from config.settings import DATABASE_PATH
+db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+hace_25h = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+with db._transaction() as conn:
+    conn.execute('UPDATE alert_history SET last_sent_at = ? WHERE alert_type = ?',
+                 (hace_25h, 'stale_48h'))
+print('alert_history retrocedida 25h')
+"
+```
+
+Re-ejecutar el paso 1 → WhatsApp debe volver a invocarse.
+
+#### 5) Simular cambio de estado (debe re-alertar inmediatamente)
+
+```powershell
+# Cambiar fecha_actualizacion de un expediente
+.venv\Scripts\python.exe -c "
+import os; os.environ['CATASTRO_BOT_DEV_MODE']='1'
+from src.core.credential_manager import CredentialManager
+from src.core.database import Database
+from config.settings import DATABASE_PATH
+db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+exps = db.expedientes_stale(horas=48)
+if exps:
+    eid = exps[0]['id']
+    # Actualizar metadata para cambiar el snapshot
+    db.actualizar_metadata(eid, {'_test_o05': 'cambio'}, actor='test-O05')
+    print(f'Expediente {eid} mutado para forzar snapshot diff')
+"
+```
+
+Re-ejecutar paso 1 → WhatsApp debe invocarse (al menos para ese expediente).
+
+#### 6) Verificar log del scheduler
+
+Cuando un ciclo se suprime completo, el log dice:
+
+```
+stale-alert: 5 bloqueados pero todos alertados <24h sin cambios — skip
+```
+
+Cuando se envía, dice:
+
+```
+stale-alert enviado a +50688888888 (2 exp nuevos / 5 totales)
+```
+
+### Criterios de aceptación
+
+- [x] Tabla `alert_history` existe con PK compuesta (expediente_id, alert_type).
+- [x] `Database.alert_history_get/upsert/listar` funcionan como helpers públicos.
+- [x] **Test de aceptación del plan:** 8 corridas de stale-alert
+      sobre el mismo expediente bloqueado → ≤3 envíos (cumple "≤2-3" del plan).
+- [x] Cambio de estado dispara re-alerta inmediata (no espera 24h).
+- [x] El mensaje al admin distingue "nuevos / con cambios" del total bloqueado.
+- [x] Tests: **18 nuevos** (3 schema + 5 helpers + 3 snapshot + 5 filtro + 2 integración).
+
+### Tests automatizados relacionados
+
+| Archivo | Tests | Cubre |
+|---|---|---|
+| `test_stale_alert_novelty.py` | 18 | Schema, helpers Database, snapshot, filtro, criterio aceptación |
+
+### Limitaciones conocidas
+
+1. **Cooldown global de 24h.** Si el operador quiere que algunos
+   expedientes críticos vuelvan a alertar más rápido, hay que extender
+   con un `cooldown_hours` por `alert_type` (o por expediente). Por
+   ahora todos comparten 24h.
+2. **El snapshot ignora cambios en metadata_json.** Solo mira estado,
+   tipo, fecha_actualizacion. Si el operador actualiza notas internas
+   sin tocar el estado, no se re-alerta — pero eso es correcto: la
+   alerta es por "bloqueo", no por "actividad humana".
+3. **No purga `alert_history` viejas.** Si un expediente se
+   completa/cancela, su fila queda. Idealmente: trigger SQL que la
+   borre cuando `expedientes.completado=1` o `cancelado=1`. Próxima
+   iteración.
+4. **Único `alert_type` en uso hoy:** `stale_48h`. La infraestructura
+   está lista para `apt_correcciones`, `cliente_pendiente_pago`, etc.
+
+---
