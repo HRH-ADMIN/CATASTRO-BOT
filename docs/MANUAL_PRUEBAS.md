@@ -184,3 +184,160 @@ data: {"type": "expediente_updated", "id": "...", "estado_actual": "...", ...}
 | `test_dashboard_sync.py` | 4 | E2E: mutación → publish → subscriber recibe |
 
 ---
+
+## U-03 — Panel de control con máquina de estados
+
+**Sprint:** 1
+**Fecha de implementación:** 2026-05-22
+**Branch:** `sprint-1/u-03-state-machine`
+
+### Por qué este cambio existe
+
+El operador reportó que "el botón de apagado no funciona". Diagnóstico en
+`docs/AUDITORIA_CONTROL_STATE.md` reveló DOS sistemas de control coexistiendo
+sin sincronización (toggles JSON + taskkill+Popen). U-03 unifica ambos en
+una máquina de estados explícita con feedback visual claro.
+
+### Procedimiento
+
+1. **Arrancar el bot:**
+   ```powershell
+   .venv\Scripts\python.exe -m src.main
+   ```
+   En los logs deberías ver:
+   ```
+   state_machine: bootstrap completado (7 módulos)
+   ```
+   Esto indica que los módulos quedaron en RUNNING en la tabla
+   `module_state` automáticamente.
+
+2. **Abrir el panel:** `http://localhost:9224/config/control`
+   - Verificar que se ven 7 cards: `global`, `apt`, `muni`, `whatsapp`,
+     `scheduler`, `drive_backup`, `rnp`.
+   - Todas con badge **`RUNNING`** verde pulsante.
+   - El chip `live ✓` en el header confirma que SSE está conectado.
+
+3. **Probar transición simple — apagar APT:**
+   - Click en **`■ Detener`** sobre la card `apt`.
+   - Aparece modal "Detener apt" con campo de razón.
+   - Escribir cualquier texto (ej. "test U-03") y confirmar.
+   - **Esperado:**
+     - Toast verde: "Transición iniciada: apt → STOPPING".
+     - Badge cambia a `STOPPING` (ámbar pulsante).
+     - Botón se reemplaza por "Deteniendo…" deshabilitado.
+   - En este momento el bot interno **deja de correr** los jobs `apt-sync-estados`. Verificar en logs:
+     ```
+     apt-sync-estados: skipped — módulo apt en estado STOPPING (no RUNNING)
+     ```
+   - Esperar al worker (no implementado todavía en este sprint) — para
+     completar el ciclo, simular el `mark_stopped`:
+     ```powershell
+     .venv\Scripts\python.exe -c "
+     from src.core.state_machine import get_state_machine
+     get_state_machine().mark_stopped('apt', actor='manual-test')
+     "
+     ```
+   - Badge debe pasar a `STOPPED` gris automáticamente (via SSE).
+   - El botón cambia a "▶ Iniciar".
+
+4. **Probar emergency stop:**
+   - En la "Zona de emergencia", escribir literal `APAGAR TODO`
+     (mayúsculas, sin comillas).
+   - El botón "🛑 Apagar todo" se habilita solo cuando el texto matchea.
+   - Click → modal de confirmación con campo de razón opcional.
+   - Confirmar.
+   - **Esperado:**
+     - Toast amarillo: "🛑 Emergency stop aplicado · cooldown 300s".
+     - Todos los módulos en RUNNING pasan a STOPPING.
+     - Todos reciben `cooldown_until` 5 minutos adelante.
+   - Intentar **iniciar** un módulo durante el cooldown:
+     - Click "▶ Iniciar" en cualquier card en STOPPED.
+     - El API devuelve **423 Locked** con `cooldown_until`.
+     - Toast rojo con el mensaje del cooldown.
+
+5. **Reset desde error (simulado):**
+   ```powershell
+   .venv\Scripts\python.exe -c "
+   from src.core.state_machine import get_state_machine
+   sm = get_state_machine()
+   sm.start('whatsapp', actor='test', force=True)
+   sm.mark_error('whatsapp', actor='test', error_message='Green API 466')
+   "
+   ```
+   - En el panel, la card `whatsapp` muestra badge `ERROR` rojo + el
+     error en los detalles.
+   - Click **`⟲ Reset`** → modal → confirmar.
+   - Badge pasa a `STOPPED`.
+
+### Inspección directa via API (curl / DevTools)
+
+```powershell
+# Snapshot
+curl http://localhost:9224/api/control/status
+
+# Iniciar apt
+curl -X POST http://localhost:9224/api/control/start/apt `
+  -H "Content-Type: application/json" `
+  -d "{\"reason\":\"test\"}"
+
+# Emergency stop
+curl -X POST http://localhost:9224/api/control/emergency-stop `
+  -H "Content-Type: application/json" `
+  -d "{\"confirmation\":\"APAGAR TODO\",\"reason\":\"test\",\"cooldown_seconds\":60}"
+```
+
+### Verificación de que el gating funciona
+
+Con `apt` en `STOPPED`, el job `apt-sync-estados` (que corre cada 30 min)
+debe SALTAR. En logs:
+```
+apt-sync-estados: skipped — módulo apt en estado STOPPED (no RUNNING)
+```
+
+Si volvés a iniciar `apt` (transición a `STARTING` → `RUNNING` via la
+máquina), el próximo tick lo encuentra en `RUNNING` y ejecuta.
+
+### Criterios de aceptación (del plan U-03)
+
+- [x] Click en "Apagar APT" produce confirmación, transición visible
+      (`STOPPING`), y estado final consistente (`STOPPED`).
+- [x] El estado en el header del panel se refleja en ≤2 segundos del
+      cambio (gracias a SSE de U-04).
+- [x] Botón de emergencia funciona, requiere texto literal `APAGAR TODO`,
+      aplica cooldown.
+- [x] Tests pasando: 28 state_machine + 17 API + 7 gated + 2 panel HTML
+      = **54 tests nuevos** de U-03.
+
+### Tests automatizados relacionados
+
+| Archivo | Tests | Cubre |
+|---|---|---|
+| `test_control_state_machine.py` | 28 | Máquina de estados + transiciones + cooldown + emergency |
+| `test_dashboard_control_api.py` | 17 + 2 | Endpoints REST + página HTML |
+| `test_gated_state_machine.py` | 7 | Wrapper `_gated()` lee SM con fallback legacy |
+
+### Compatibilidad con sistema anterior
+
+- `data/control.json` (sistema A original) sigue funcionando como
+  espejo durante la migración. El operador puede tocarlo manualmente y
+  los módulos legacy que no usen la SM lo van a respetar.
+- Los botones del viejo `/config` (sistema B con taskkill+Popen) NO se
+  eliminaron en este sprint — quedan como herramienta de emergencia
+  cuando la SM no es suficiente (ej. proceso colgado que la SM marcó
+  como RUNNING pero realmente no responde).
+- Próximos sprints irán deprecando ambos en favor de la SM.
+
+### Limitaciones conocidas del MVP
+
+1. **El worker que efectivamente arranca/mata procesos** (Chrome bot,
+   scheduler, watchdog) todavía vive en `_ejecutar_control` del
+   dashboard legacy. La SM solo marca el estado, NO controla los
+   procesos del SO. Próxima iteración (no en este sprint): conectar
+   la transición `STOPPING` con `taskkill` y `STARTING` con `Popen`.
+2. **Bootstrap fuerza RUNNING** sin verificar que los procesos
+   subyacentes estén realmente vivos. Si Chrome del bot está caído al
+   arrancar, la SM dirá `apt: RUNNING` aunque CDP no responda. El
+   healthcheck (`/api/health`) sigue siendo la fuente de verdad para
+   "¿está vivo el sistema?".
+
+---

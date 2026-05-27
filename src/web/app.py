@@ -35,6 +35,13 @@ from flask import Flask, Response, jsonify, redirect, request
 
 from src.core.control_state import KNOWN_MODULES, get_manager as get_control_manager
 from src.core.credential_manager import CredentialManager
+from src.core.state_machine import (
+    CooldownActive,
+    InvalidTransition,
+    UnknownModule,
+    KNOWN_MODULES as SM_KNOWN_MODULES,
+    get_state_machine,
+)
 from src.utils.event_bus import get_bus as _get_event_bus
 from src.utils.webhook_security import verify_bearer_token
 
@@ -96,6 +103,20 @@ def create_app() -> Flask:
     @app.route("/config", methods=["GET"])
     def config_page():
         return legacy._render_config_html(), 200, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+        }
+
+    @app.route("/config/control", methods=["GET"])
+    def control_panel_page():
+        """Panel de control de módulos (U-03 paso 2.3).
+
+        Standalone page que consume /api/control/* + SSE para mostrar
+        el estado live de cada módulo y permitir transiciones con
+        confirmación + audit.
+        """
+        from src.utils.dashboard_control_html import render_control_panel_html
+        return render_control_panel_html(), 200, {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-store",
         }
@@ -185,6 +206,133 @@ def create_app() -> Flask:
             reason="manual resume via /api/resume",
         )
         return jsonify(new_state.to_dict())
+
+    # ───────────────── Control State Machine (U-03 paso 2.2) ───────────
+    # Reemplaza el modelo binario de /api/state con una máquina de estados
+    # explícita que permite mostrar 'Apagando…' en lugar de saltos binarios.
+    # SSOT: tabla module_state. control_state.py (legacy) sigue funcionando
+    # en paralelo durante la migración (paso 2.4 lo deprecará).
+
+    @app.route("/api/control/status", methods=["GET"])
+    def api_control_status():
+        """Snapshot de todos los módulos."""
+        sm = get_state_machine()
+        return jsonify({
+            "modules": [s.to_dict() for s in sm.read_all()],
+            "known_modules": list(SM_KNOWN_MODULES),
+        })
+
+    @app.route("/api/control/transition/<transition_id>", methods=["GET"])
+    def api_control_transition(transition_id: str):
+        """Polling de una transición en curso. El frontend lo usa para
+        saber cuándo la transición llegó a un estado final."""
+        sm = get_state_machine()
+        st = sm.get_transition(transition_id)
+        if st is None:
+            return jsonify({"error": "transition_id no encontrado"}), 404
+        body = st.to_dict()
+        body["is_final"] = st.is_final()
+        return jsonify(body)
+
+    @app.route("/api/control/start/<module>", methods=["POST"])
+    def api_control_start(module: str):
+        """Inicia transición STOPPED → STARTING. Devuelve transition_id.
+
+        El frontend después hace polling a /api/control/transition/<id>
+        hasta que state == RUNNING o ERROR.
+
+        Body JSON opcional: {"reason": "...", "force": false}.
+        """
+        denied = _require_auth_for_mutations()
+        if denied:
+            return jsonify(denied[0]), denied[1]
+        sm = get_state_machine()
+        data = request.get_json(silent=True) or {}
+        reason = (data.get("reason") or "manual start via dashboard")[:200]
+        force = bool(data.get("force"))
+        actor = request.headers.get("X-Actor", "web_dashboard")
+        try:
+            st = sm.start(module, actor=actor, reason=reason, force=force)
+        except UnknownModule as exc:
+            return jsonify({"error": str(exc), "known": list(SM_KNOWN_MODULES)}), 400
+        except InvalidTransition as exc:
+            return jsonify({"error": str(exc), "current_state": sm.read(module).state}), 409
+        except CooldownActive as exc:
+            return jsonify({
+                "error": str(exc),
+                "cooldown_until": sm.read(module).cooldown_until,
+                "hint": "Re-intentar tras el cooldown o usar force=true",
+            }), 423  # 423 Locked
+        return jsonify(st.to_dict()), 202  # 202 Accepted — transición en curso
+
+    @app.route("/api/control/stop/<module>", methods=["POST"])
+    def api_control_stop(module: str):
+        """Inicia transición RUNNING → STOPPING. Devuelve transition_id."""
+        denied = _require_auth_for_mutations()
+        if denied:
+            return jsonify(denied[0]), denied[1]
+        sm = get_state_machine()
+        data = request.get_json(silent=True) or {}
+        reason = (data.get("reason") or "manual stop via dashboard")[:200]
+        actor = request.headers.get("X-Actor", "web_dashboard")
+        try:
+            st = sm.stop(module, actor=actor, reason=reason)
+        except UnknownModule as exc:
+            return jsonify({"error": str(exc), "known": list(SM_KNOWN_MODULES)}), 400
+        except InvalidTransition as exc:
+            return jsonify({"error": str(exc), "current_state": sm.read(module).state}), 409
+        return jsonify(st.to_dict()), 202
+
+    @app.route("/api/control/reset/<module>", methods=["POST"])
+    def api_control_reset(module: str):
+        """ERROR → STOPPED (reset manual tras error)."""
+        denied = _require_auth_for_mutations()
+        if denied:
+            return jsonify(denied[0]), denied[1]
+        sm = get_state_machine()
+        data = request.get_json(silent=True) or {}
+        reason = (data.get("reason") or "manual reset from ERROR")[:200]
+        actor = request.headers.get("X-Actor", "web_dashboard")
+        try:
+            st = sm.reset_error(module, actor=actor, reason=reason)
+        except UnknownModule as exc:
+            return jsonify({"error": str(exc)}), 400
+        except InvalidTransition as exc:
+            return jsonify({"error": str(exc), "current_state": sm.read(module).state}), 409
+        return jsonify(st.to_dict())
+
+    @app.route("/api/control/emergency-stop", methods=["POST"])
+    def api_control_emergency_stop():
+        """Kill switch global. EXIGE confirmación textual.
+
+        Body: {"confirmation": "APAGAR TODO", "reason": "...", "cooldown_seconds": 300}.
+        Si el confirmation no matchea exactamente, rechaza con 400.
+        """
+        denied = _require_auth_for_mutations()
+        if denied:
+            return jsonify(denied[0]), denied[1]
+        data = request.get_json(silent=True) or {}
+        if data.get("confirmation") != "APAGAR TODO":
+            return jsonify({
+                "error": "Para emergency-stop se requiere "
+                         "{'confirmation': 'APAGAR TODO'}",
+            }), 400
+        cooldown = int(data.get("cooldown_seconds", 300))
+        # Sanity: máximo 1 hora de cooldown vía API (más es sospechoso)
+        cooldown = max(60, min(cooldown, 3600))
+        reason = (data.get("reason") or "manual emergency stop")[:200]
+        actor = request.headers.get("X-Actor", "web_dashboard")
+
+        sm = get_state_machine()
+        results = sm.emergency_stop(
+            actor=actor, reason=reason, cooldown_seconds=cooldown,
+        )
+        return jsonify({
+            "modules": [r.to_dict() for r in results],
+            "cooldown_seconds": cooldown,
+            "actor": actor,
+            "reason": reason,
+        })
 
     # ─────────────────────── Server-Sent Events ─────────────────────────
     # Stream de eventos para push en tiempo real al dashboard (U-04 paso 5).

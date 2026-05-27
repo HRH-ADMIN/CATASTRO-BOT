@@ -202,6 +202,34 @@ class BotRuntime:
         # Heartbeat inicial — para que la web vea estado actualizado de inmediato
         self._control.write_heartbeat()
 
+        # ── Bootstrap U-03: marcar módulos como RUNNING en la state machine ──
+        # Si la state machine está vacía (BD fresca o primera vez post-U-03),
+        # auto-iniciar los módulos así el gating no bloquea todo el bot.
+        # Para módulos individuales (apt, muni, whatsapp, drive_backup, rnp)
+        # el operador después puede pararlos vía /config/control.
+        try:
+            from src.core.state_machine import get_state_machine, KNOWN_MODULES
+            sm = get_state_machine()
+            for mod in KNOWN_MODULES:
+                st = sm.read(mod)
+                if st.state == "STOPPED":
+                    # Transición STOPPED → STARTING → RUNNING en bootstrap.
+                    sm.start(mod, actor="bootstrap", reason="bot startup",
+                             force=True)
+                    sm.mark_running(mod, actor="bootstrap")
+                elif st.state == "ERROR":
+                    # ERROR persistente del run anterior — el operador debe
+                    # resetear manualmente. NO auto-recuperamos.
+                    self.log.warning(
+                        "module %s quedó en ERROR del run anterior: %s",
+                        mod, st.error_message,
+                    )
+            self.log.info("state_machine: bootstrap completado (%d módulos)",
+                          len(KNOWN_MODULES))
+        except Exception:
+            self.log.exception("bootstrap state_machine falló — "
+                               "el bot sigue corriendo en modo legacy")
+
         # Dashboard Flask — corre en thread daemon, no bloquea el main
         if self._web_enabled:
             try:

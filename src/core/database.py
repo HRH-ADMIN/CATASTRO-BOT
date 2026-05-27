@@ -158,6 +158,37 @@ BEGIN
     SELECT RAISE(FAIL, 'audit_log entries are immutable');
 END;
 
+-- ── Máquina de estados de control runtime (U-03 paso 2) ───────────────────────
+-- Reemplaza el booleano simple de `data/control.json` con estados explícitos:
+--   STOPPED → STARTING → RUNNING → STOPPING → STOPPED
+--                                          ↘ ERROR
+--
+-- Cada módulo (apt, muni, whatsapp, scheduler, global) tiene una fila.
+-- 'global' es el master kill switch — si está STOPPED, los demás también
+-- se consideran gated.
+--
+-- transition_id permite que el frontend haga polling de una transición
+-- en curso sin pisar otras.
+--
+-- cooldown_until bloquea reinicios programáticos durante una ventana
+-- después del emergency-stop (default: 5 min).
+--
+-- Plan: PLAN_MEJORAS Sprint 1 / U-03 paso 2.
+-- Documento normativo: docs/SCHEMA.md.
+CREATE TABLE IF NOT EXISTS module_state (
+    module_name              TEXT PRIMARY KEY,
+    state                    TEXT NOT NULL DEFAULT 'STOPPED',
+    last_transition_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    last_transition_reason   TEXT,
+    last_transition_actor    TEXT,
+    last_transition_id       TEXT,
+    last_heartbeat_at        TEXT,
+    error_message            TEXT,
+    cooldown_until           TEXT,
+    CHECK (state IN ('STOPPED','STARTING','RUNNING','STOPPING','ERROR'))
+);
+CREATE INDEX IF NOT EXISTS idx_module_state_state ON module_state(state);
+
 -- ── Vista normalizada para el dashboard ──────────────────────────────────────
 -- v_expedientes_dashboard: SSOT calculado para la UI.
 --
