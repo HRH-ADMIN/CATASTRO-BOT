@@ -418,15 +418,56 @@ class APTAgent(BaseAgent):
 
     @contextlib.contextmanager
     def _session(self):
-        """Context manager que provee una pagina Playwright usando perfil Chrome persistente.
+        """Context manager que provee una pagina Playwright para operar APT.
 
-        A diferencia del storage_state (solo cookies/localStorage),
-        launch_persistent_context preserva TODA la sesión del navegador incluyendo
-        IndexedDB, service workers y certificados de sesión SSO.
-        El perfil se guarda en APT_PROFILE_PATH y persiste entre reinicios del bot.
+        MODO PREFERIDO (CDP): si el Chrome del bot está corriendo en el
+        puerto 9222, conectamos via DevTools Protocol y reusamos la
+        ventana del usuario. Cero spam de pestañas — el bot trabaja
+        adentro de la sesión que el operador ya tiene abierta.
+
+        FALLBACK (launch_persistent_context): si NO hay CDP disponible
+        (Chrome del bot caído), lanzamos un Chrome dedicado con el
+        perfil persistente. Menos limpio porque cada llamada abre/cierra
+        una instancia Chrome, pero la única forma de operar sin CDP.
+
+        HOTFIX 2026-05-27: Antes este `_session` SIEMPRE usaba el
+        fallback (launch_persistent_context) sin chequear CDP, lo que
+        causaba spam visible de Chrome abriéndose y cerrándose en cada
+        job apt-sync (cada 30 min, sobre cada expediente activo).
+        Ahora SOLO usa el fallback si CDP no responde.
         """
         from playwright.sync_api import sync_playwright  # importacion diferida
 
+        # ── MODO PREFERIDO: CDP ─────────────────────────────────────
+        if self._cdp_disponible():
+            with sync_playwright() as p:
+                browser = p.chromium.connect_over_cdp(self._cdp_endpoint)
+                try:
+                    if not browser.contexts:
+                        raise APTSesionRequeridaError(
+                            "Chrome conectado sin contextos. "
+                            "Ejecute APT SESION primero."
+                        )
+                    # Limpiar blanks acumulados antes de buscar/crear
+                    with contextlib.suppress(Exception):
+                        cleanup_blank_tabs(browser, max_blank=1)
+                    page = get_or_create_apt_page(browser)
+                    yield page
+                    # Importante: NO cerramos `browser` ni `page` aca —
+                    # el browser pertenece al Chrome del usuario y se
+                    # debe mantener vivo. Cerrar la conexion CDP en el
+                    # finally es suficiente.
+                finally:
+                    with contextlib.suppress(Exception):
+                        browser.close()
+            return
+
+        # ── FALLBACK: launch_persistent_context ─────────────────────
+        # Solo cuando CDP no responde. Cada llamada lanza un Chrome
+        # nuevo — costoso, pero la única forma sin CDP.
+        self._log.info(
+            "_session: CDP no disponible, fallback a launch_persistent_context"
+        )
         self._profile_path.mkdir(parents=True, exist_ok=True)
         self._limpiar_lock_perfil()
         with _PROFILE_LOCK:
@@ -438,14 +479,8 @@ class APTAgent(BaseAgent):
                     slow_mo=self._slow_mo,
                 )
                 try:
-                    # HOTFIX 2026-05-22: limpiar tabs blank residuales antes
-                    # de empezar (perfil persistente puede traer tabs vacías
-                    # del run anterior).
                     with contextlib.suppress(Exception):
                         cleanup_blank_tabs(ctx, max_blank=0)
-                    # Reusar pestaña APT existente del perfil si la hay, sino
-                    # abrir UNA. Antes esto siempre abría una nueva además de
-                    # las que ya tenía el contexto.
                     page = get_or_create_apt_page(ctx)
                     try:
                         yield page
