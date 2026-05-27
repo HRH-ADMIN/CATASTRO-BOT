@@ -1654,3 +1654,137 @@ Abrirla en el browser. Network tab → ver que el request resulta en
    eso preocupa, rotar manualmente borrando la cookie del browser.
 
 ---
+
+## S-07 — Rate limit en `/api/*`
+
+**Sprint:** 4
+**Fecha de implementación:** 2026-05-27
+**Branch:** `sprint-4/s-07-rate-limit`
+
+### Qué hace
+
+Defensa contra:
+- **Brute-force** de Bearer tokens (atacante intentando miles de combinaciones).
+- **DoS local** de un script enloquecido o atacante con extensión maliciosa
+  que hace 1000 req/s contra `/api/control/emergency-stop`.
+
+Implementación: **sliding window in-memory**, sin deps externas (no
+flask-limiter). Por endpoint:
+
+| Path | Límite |
+|---|---|
+| `/api/control/emergency-stop` | 5 req / 60s |
+| `/api/control/stop` | 10 req / 60s |
+| `/api/control/reset` | 10 req / 60s |
+| `/config/set` | 10 req / 60s |
+| **Default (todo lo demás)** | 60 req / 60s |
+| `/api/events/stream` (SSE) | **Exento** |
+| `/api/health` | **Exento** |
+
+Cuenta por `(remote_addr, endpoint_path)`. Dos clientes con IP distinta
+tienen cuotas independientes.
+
+### Procedimiento
+
+#### 1) Verificar headers en respuesta normal
+
+```powershell
+curl -i http://localhost:9224/api/state 2>&1 | Select-String "X-RateLimit"
+```
+
+Esperado:
+```
+X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 59
+X-RateLimit-Reset: 1717000000
+```
+
+#### 2) Provocar 429 (excederse en emergency-stop)
+
+```powershell
+1..6 | ForEach-Object {
+    $r = curl -s -o NUL -w "%{http_code}" -X POST `
+        http://localhost:9224/api/control/emergency-stop `
+        -H "Content-Type: application/json" `
+        -d '{\"confirmation\":\"no-match\"}'
+    Write-Output "intento $_: $r"
+}
+```
+
+Esperado:
+```
+intento 1..5: 400 (o 401/403 — pero NO 429)
+intento 6:    429   ← excedió 5/min
+```
+
+#### 3) Verificar 429 contiene Retry-After
+
+```powershell
+curl -i -X POST http://localhost:9224/api/control/emergency-stop `
+     -H "Content-Type: application/json" `
+     -d '{\"confirmation\":\"x\"}' 2>&1 | Select-String "Retry-After|HTTP"
+```
+
+Esperado:
+```
+HTTP/1.1 429 TOO MANY REQUESTS
+Retry-After: <segundos hasta reset>
+```
+
+#### 4) Verificar endpoint exento
+
+```powershell
+1..100 | ForEach-Object {
+    curl -s -o NUL -w "%{http_code}`n" http://localhost:9224/api/health
+} | Group-Object | Format-Table Count, Name
+```
+
+Esperado: todas las respuestas son `200` o `503` (nunca 429).
+
+#### 5) Verificar reset tras ventana
+
+Esperar 60s después de un 429 y reintentar — debería volver a permitir.
+
+#### 6) Cliente con IP distinta no comparte cuota
+
+En producción con dos browsers reales en IPs distintas se nota. En
+localhost los tests automatizados (`test_rate_limit.py`) lo cubren
+inyectando `REMOTE_ADDR` distintos.
+
+### Criterios de aceptación
+
+- [x] `/api/control/emergency-stop`: 6° hit en 60s → **429**.
+- [x] `/api/state`: 61° hit en 60s → **429**.
+- [x] Todas las responses tienen `X-RateLimit-Limit/Remaining/Reset`.
+- [x] 429 tiene `Retry-After`.
+- [x] SSE (`/api/events/stream`) y `/api/health` exentos.
+- [x] IPs distintas tienen cuotas independientes.
+- [x] `app.config['RATE_LIMIT_DISABLED']=True` apaga el middleware (para tests).
+- [x] Tests: **19 nuevos** (4 store + 4 path-resolver + 9 integración Flask + 2 headers).
+
+### Tests automatizados relacionados
+
+| Archivo | Tests | Cubre |
+|---|---|---|
+| `test_rate_limit.py` | 19 | Sliding window, path matching, headers, exenciones, IPs |
+
+### Limitaciones conocidas
+
+1. **In-memory.** Cuotas se resetean si se reinicia el bot. Para
+   single-user es aceptable; para multi-instance habría que migrar a
+   Redis (no es el caso actual del dashboard).
+2. **No detecta IPs detrás de proxy.** `request.remote_addr` ve la IP
+   del proxy, no la del cliente real. Si en el futuro se pone Nginx
+   delante, hay que leer `X-Forwarded-For`. Por ahora es localhost
+   directo, no hay proxy.
+3. **Requests rechazados no se suman a la ventana** — solo cuentan
+   los aceptados. Es intencional: el `reset_in` debe ser estable
+   aunque el atacante mantenga el rate alto.
+4. **Bearer válido NO exime de rate limit.** A diferencia de CSRF,
+   acá el bearer también está rate-limited. Defensa contra brute-force
+   del propio Bearer.
+5. **Sin GUI para ver el estado.** El log dice cuando rechaza. Si se
+   quiere panel, sería un endpoint `/api/rate-limit/stats` listando
+   los buckets activos.
+
+---

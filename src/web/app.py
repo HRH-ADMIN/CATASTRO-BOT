@@ -102,6 +102,13 @@ def create_app() -> Flask:
     # cuando se usa solo el factory para tests.
     from src.utils import dashboard_web as legacy
     from src.web.csrf import install_csrf_protection
+    from src.web.rate_limit import install_rate_limit
+
+    # ──────────────────────────── Rate limit (Sprint 4 / S-07) ──────────
+    # Sliding window in-memory. Default 60 req/min/IP, endpoints
+    # destructivos (emergency-stop, control/stop) 5-10 req/min.
+    # SSE y /api/health exentos.
+    install_rate_limit(app)
 
     # ──────────────────────────── CSRF (Sprint 4 / S-04) ────────────────
     # Double-submit cookie pattern. Middleware verifica POST/PUT/DELETE
