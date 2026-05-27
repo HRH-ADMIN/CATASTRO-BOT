@@ -161,6 +161,29 @@ def create_app() -> Flask:
         from urllib.parse import quote
         return redirect(f"/config?msg={quote(resultado)}", code=303)
 
+    @app.route("/control", methods=["POST"])
+    def control_form():
+        """Endpoint legacy: forms HTML del dashboard que disparan
+        encender/apagar/reiniciar de servicios (chrome, watchdog, scheduler).
+
+        Antes existia solo en el dashboard standalone (http.server) y
+        nunca se migro a Flask cuando arrancamos a usar create_app.
+        Resultado: los botones daban 404 ANTES del fix S-04 (y 403
+        csrf_invalido despues, porque ni siquiera incluian token).
+
+        Este endpoint reusa la logica legacy `_ejecutar_control` y
+        redirige al /config con el mensaje de resultado (UX clasica
+        post-form-submit).
+        """
+        denied = _require_auth_for_mutations()
+        if denied:
+            return jsonify(denied[0]), denied[1]
+        accion   = (request.form.get("accion")   or "").strip()
+        servicio = (request.form.get("servicio") or "").strip()
+        resultado = legacy._ejecutar_control(accion, servicio)
+        from urllib.parse import quote
+        return redirect(f"/config?msg={quote(resultado)}", code=303)
+
     # ──────────────────────────── JSON APIs ─────────────────────────────
 
     @app.route("/api/expedientes", methods=["GET"])

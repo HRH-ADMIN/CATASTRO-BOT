@@ -69,13 +69,23 @@ def tokens_match(a: Optional[str], b: Optional[str]) -> bool:
 def get_or_create_token() -> str:
     """Devuelve el token del request actual o genera uno nuevo.
 
-    Si el request viene con cookie, la usa. Si no, genera una nueva
-    (que el caller debe setear en la response).
+    Si el request viene con cookie, la usa. Si no, genera una nueva,
+    la guarda en `flask.g` y el middleware after_request la setea
+    como cookie en la response. Asi un mismo token se usa para todo
+    el ciclo request->render->response, garantizando que el HTML
+    renderizado tenga el mismo token que la cookie que se va a setear.
     """
+    from flask import g
     existing = request.cookies.get(CSRF_COOKIE_NAME)
     if existing and len(existing) >= 32:
         return existing
-    return generate_token()
+    # Reusar entre múltiples llamadas en el mismo request
+    pending = getattr(g, "_csrf_token_pending", None)
+    if pending:
+        return pending
+    token = generate_token()
+    g._csrf_token_pending = token
+    return token
 
 
 def is_csrf_exempt(*, has_valid_bearer: bool) -> bool:
@@ -98,20 +108,38 @@ def is_csrf_exempt(*, has_valid_bearer: bool) -> bool:
 def verify_csrf_or_403() -> Optional[tuple[dict, int]]:
     """Verifica el token CSRF del request actual.
 
+    Acepta el token en TRES lugares (en orden de preferencia):
+      1. Header X-CSRF-Token (forma estandar, usada por fetch wrapper)
+      2. Form field `csrf_token` (para forms HTML clasicos sin JS)
+      3. JSON body `csrf_token` (alternativa para clientes API)
+
     Returns:
         None si pasa.
         (response_dict, 403) si falla.
     """
     cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
-    header_token = request.headers.get(CSRF_HEADER_NAME)
-    if not tokens_match(cookie_token, header_token):
+    # 1. Header
+    submitted = request.headers.get(CSRF_HEADER_NAME)
+    # 2. Form field
+    if not submitted and request.form:
+        submitted = request.form.get("csrf_token")
+    # 3. JSON body
+    if not submitted and request.is_json:
+        try:
+            body = request.get_json(silent=True) or {}
+            if isinstance(body, dict):
+                submitted = body.get("csrf_token")
+        except Exception:
+            pass
+
+    if not tokens_match(cookie_token, submitted):
         _log.warning(
-            "CSRF rechazado: method=%s path=%s cookie=%s header=%s",
+            "CSRF rechazado: method=%s path=%s cookie=%s submitted=%s",
             request.method, request.path,
             "yes" if cookie_token else "no",
-            "yes" if header_token else "no",
+            "yes" if submitted else "no",
         )
-        return ({"error": "csrf_token_invalid_or_missing"}, 403)
+        return ({"error": "csrf_token_invalido_o_faltante"}, 403)
     return None
 
 
@@ -173,7 +201,10 @@ def install_csrf_protection(
 
     @app.after_request
     def _csrf_set_cookie(resp: Response) -> Response:
+        from flask import g
         # Si la response es HTML y no hay cookie, setear una.
+        # Reutilizar el token que `get_or_create_token()` pueda haber
+        # generado durante el render, para que cookie y HTML coincidan.
         if request.method not in SAFE_METHODS:
             return resp
         if request.cookies.get(CSRF_COOKIE_NAME):
@@ -181,7 +212,8 @@ def install_csrf_protection(
         # Solo setear para responses HTML (no API JSON)
         ct = resp.headers.get("Content-Type", "")
         if "text/html" in ct:
-            return attach_token_cookie(resp, generate_token())
+            token = getattr(g, "_csrf_token_pending", None) or generate_token()
+            return attach_token_cookie(resp, token)
         return resp
 
 

@@ -551,13 +551,24 @@ def _set_credencial(key: str, val1: str, val2: str = "") -> str:
 def _render_config_html(msg: str = "") -> str:
     """Renderiza la página /config con formularios para cada credencial."""
     from urllib.parse import urlparse, parse_qs
+
+    # Token CSRF para forms HTML clasicos (hotfix S-04 forms).
+    try:
+        from src.web.csrf import get_or_create_token as _csrf_get
+        _csrf_token = _csrf_get()
+    except Exception:
+        _csrf_token = ""
+
     estado = _obtener_config_estado()
     bot = _obtener_estado_bot()
 
     # Panel "Control del bot"
     def _btn(action, service, label, color, icon=""):
+        # CSRF: hidden input para que el middleware acepte el POST.
+        # Sin este campo el server devuelve 403 csrf_token_invalido.
         return f"""
         <form method="POST" action="/control" style="display:inline-block;margin:4px">
+            <input type="hidden" name="csrf_token" value="{_csrf_token}">
             <input type="hidden" name="accion" value="{action}">
             <input type="hidden" name="servicio" value="{service}">
             <button type="submit" class="ctl-btn ctl-{color}">
@@ -635,6 +646,7 @@ def _render_config_html(msg: str = "") -> str:
                 <small>Estado actual: <code>{html.escape(est['detalle'][:60])}</code></small>
             </div>
             <form method="POST" action="/config/set" class="cfg-form">
+                <input type="hidden" name="csrf_token" value="{_csrf_token}" />
                 <input type="hidden" name="key" value="{key}" />
                 {fields_html}
                 <button type="submit">Actualizar {html.escape(cred['label'])}</button>
@@ -944,6 +956,15 @@ def _obtener_estado_bot() -> dict:
 
 def _render_html(refresh_sec: int = 30) -> str:
     from src.web.csrf_js import CSRF_FETCH_WRAPPER_JS as _CSRF_JS  # noqa: F841
+
+    # Token CSRF para forms HTML clasicos (botones encender/apagar/config).
+    # Si no estamos en un Flask request context (ej. tests que renderizan
+    # standalone), generar uno descartable que no se va a usar para POST.
+    try:
+        from src.web.csrf import get_or_create_token as _csrf_get
+        _csrf_token = _csrf_get()
+    except Exception:
+        _csrf_token = ""
 
     exps = _leer_expedientes()
     bot = _obtener_estado_bot()
