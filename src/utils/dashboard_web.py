@@ -34,8 +34,15 @@ from typing import Optional
 
 log = logging.getLogger("catastro.dashboard_web")
 
+# Raíz del proyecto (C:\catastro-bot). Usada por `_lanzar_proceso()` como
+# cwd al hacer Popen de los componentes del bot (Chrome, watchdog, scheduler).
+# Antes era referenciada sin definir, lo que hacía fallar los botones
+# "Encender" del panel /config con NameError: name 'ROOT' is not defined.
+# Fix: hotfix/dashboard-root-undefined (2026-05-22).
+ROOT = Path(__file__).resolve().parents[2]
+
 DEFAULT_PORT = 9224
-DB_PATH = Path("data/catastro.db")
+DB_PATH = ROOT / "data" / "catastro.db"
 
 
 # ── Mapeo estado → (etapa human, color hex, próximo paso) ──────────────
