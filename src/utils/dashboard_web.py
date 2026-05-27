@@ -1735,7 +1735,30 @@ def start_dashboard_server(port: int = DEFAULT_PORT,
     return server
 
 
+def _redirect_stdio_if_pythonw() -> None:
+    """Si invocaron con pythonw.exe (sin consola), redirigir stdout/stderr a
+    NULL para que prints/logs no crasheen el proceso.
+
+    pythonw asigna sys.stdout/stderr = None. Cualquier llamada a print()
+    o sys.stdout.write() crashea con AttributeError o queda colgada
+    bloqueando el server.
+
+    Bug observado al arrancar el dashboard via shortcut de escritorio
+    (wscript.exe → pythonw -m src.utils.dashboard_web) — el server hacía
+    bind del puerto pero quedaba colgado sin servir HTTP.
+    """
+    import os as _os
+    for nombre in ("stdout", "stderr"):
+        stream = getattr(sys, nombre, None)
+        if stream is None:
+            try:
+                setattr(sys, nombre, open(_os.devnull, "w", encoding="utf-8"))
+            except Exception:
+                pass
+
+
 def main() -> int:
+    _redirect_stdio_if_pythonw()
     # Forzar UTF-8 en stdout para emojis en consola Windows
     import io as _io
     if hasattr(sys.stdout, "buffer"):

@@ -50,13 +50,25 @@ $IconPath = Join-Path $ProjectRoot 'assets\icon.ico'
 $UseIcon = Test-Path $IconPath
 
 # 4) Crear/sobrescribir el shortcut via WScript.Shell COM.
-#    TargetPath apunta a rundll32 para abrir la URL en el browser default
-#    sin depender del path de Chrome/Firefox.
+#    TargetPath apunta al .vbs wrapper que:
+#      a) Verifica si el dashboard ya responde en el puerto.
+#      b) Si NO responde, lo arranca con pythonw (sin ventana CMD).
+#      c) Abre el browser en la URL.
+#    Esto reemplaza el rundll32 viejo, que solo abria la URL y fallaba
+#    con "no se puede acceder a este sitio" si el dashboard estaba caido.
+$VbsPath = Join-Path $ProjectRoot 'tools\catastro_bot_abrir_dashboard.vbs'
+if (-not (Test-Path $VbsPath)) {
+    Write-Host "[ERROR] No existe el wrapper: $VbsPath" -ForegroundColor Red
+    Write-Host "        Esto es un bug - el .ps1 espera que tools\catastro_bot_abrir_dashboard.vbs"
+    Write-Host "        este en el repo. Verificar con: git status."
+    exit 1
+}
 $WshShell = New-Object -ComObject WScript.Shell
 $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
-$Shortcut.TargetPath = "$env:SystemRoot\System32\rundll32.exe"
-$Shortcut.Arguments = "url.dll,FileProtocolHandler $Url"
-$Shortcut.Description = "Catastro-Bot Dashboard ($Url)"
+# wscript.exe ejecuta el .vbs sin mostrar la consola
+$Shortcut.TargetPath = "$env:SystemRoot\System32\wscript.exe"
+$Shortcut.Arguments = "//B //Nologo `"$VbsPath`""
+$Shortcut.Description = "Catastro-Bot Dashboard ($Url) - arranca el dashboard si no esta corriendo"
 $Shortcut.WorkingDirectory = $ProjectRoot
 if ($UseIcon) {
     $Shortcut.IconLocation = "$IconPath,0"
