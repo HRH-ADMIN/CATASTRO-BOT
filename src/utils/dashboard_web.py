@@ -814,18 +814,66 @@ def _pythonw_si_existe() -> str:
     return str(pythonw) if pythonw.exists() else sys.executable
 
 
+def _proceso_ya_corriendo(modulo_o_script: str) -> Optional[int]:
+    """Si ya hay un python(w).exe corriendo este modulo, devuelve su PID.
+
+    Usado para idempotencia: si el operador clickea "Encender" varias veces,
+    NO arrancar otra instancia — antes el bug acumulaba 4 watchdogs simultaneos.
+    """
+    try:
+        import subprocess
+        # `modulo_o_script` puede ser "-m src.utils.healthcheck" o un path
+        if modulo_o_script.startswith("-m "):
+            needle = modulo_o_script[3:]
+        else:
+            needle = Path(modulo_o_script).stem
+        # Buscar via WMI los procesos python(w) cuya command line contenga el modulo.
+        # Usamos un raw string (no f-string) para los `$_` de PowerShell y solo
+        # interpolamos el `needle` via .replace() — f-string + backslashes + $_
+        # se pelean entre si.
+        ps_template = (
+            r"Get-CimInstance Win32_Process | "
+            r"Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') "
+            r"-and $_.CommandLine -like '*NEEDLE*' } | "
+            r"Select-Object -First 1 -ExpandProperty ProcessId"
+        )
+        ps_cmd = ps_template.replace("NEEDLE", needle)
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=5,
+        )
+        pid_str = r.stdout.strip()
+        if pid_str and pid_str.isdigit():
+            return int(pid_str)
+    except Exception:
+        pass
+    return None
+
+
 def _lanzar_proceso(modulo_o_script: str, *args, detached: bool = True) -> dict:
     """Lanza un proceso python en background. Devuelve {ok, pid}.
+
+    Idempotente: si YA hay un proceso ejecutando el mismo modulo,
+    devuelve el PID existente sin lanzar otra instancia. Evita el bug
+    donde clickear "Encender" varias veces acumulaba duplicados.
 
     En Windows usa pythonw.exe (sin consola) cuando existe y agrega flags
     CREATE_NO_WINDOW + DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP para
     garantizar que NO se abra ninguna ventana CMD visible al operador.
 
-    Logs van a logs/<nombre>_stdout.log para que si el proceso crashea o
+    Logs van a logs/proc_<modulo>.log para que si el proceso crashea o
     imprime algo el operador pueda diagnosticar (sin esto, pythonw + stdout
     detached pierde la salida).
     """
     import subprocess
+    # Idempotencia: chequeo PREVIO al spawn
+    pid_existente = _proceso_ya_corriendo(modulo_o_script)
+    if pid_existente:
+        return {
+            "ok": True,
+            "pid": pid_existente,
+            "ya_corria": True,
+        }
     try:
         py = _pythonw_si_existe() if sys.platform == "win32" else sys.executable
         if modulo_o_script.startswith("-m "):
