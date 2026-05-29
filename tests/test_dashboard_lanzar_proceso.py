@@ -43,10 +43,16 @@ class TestLanzarProcesoNoExploraConNameError:
         con NameError antes del fix. Ahora debe ejecutar sin error.
 
         Mockeamos subprocess.Popen para no lanzar procesos reales.
+        Tambien mockeamos _proceso_ya_corriendo y time.sleep para que
+        el flujo llegue rapido al Popen real (sin esperar a que WMI
+        detecte el proceso falso).
         """
         fake_proc = MagicMock()
         fake_proc.pid = 99999
-        with patch("subprocess.Popen",
+        with patch("src.utils.dashboard_web._proceso_ya_corriendo",
+                   return_value=None), \
+             patch("time.sleep", return_value=None), \
+             patch("subprocess.Popen",
                    return_value=fake_proc) as mock_popen:
             result = _lanzar_proceso("-m src.utils.healthcheck", "--interval", "60")
 
@@ -61,11 +67,26 @@ class TestLanzarProcesoNoExploraConNameError:
     def test_lanzar_proceso_no_explota_con_script_path(self):
         fake_proc = MagicMock()
         fake_proc.pid = 88888
-        with patch("subprocess.Popen",
+        with patch("src.utils.dashboard_web._proceso_ya_corriendo",
+                   return_value=None), \
+             patch("time.sleep", return_value=None), \
+             patch("subprocess.Popen",
                    return_value=fake_proc):
             result = _lanzar_proceso("tools/start_chrome_bot.py")
         assert result["ok"] is True
         assert result["pid"] == 88888
+
+    def test_lanzar_proceso_idempotente_si_ya_corre(self):
+        """Si _proceso_ya_corriendo devuelve un PID, NO se lanza otra
+        instancia. Devuelve {pid, ya_corria=True}."""
+        with patch("src.utils.dashboard_web._proceso_ya_corriendo",
+                   return_value=42424), \
+             patch("subprocess.Popen") as mock_popen:
+            result = _lanzar_proceso("-m src.utils.healthcheck")
+        assert result["ok"] is True
+        assert result["pid"] == 42424
+        assert result.get("ya_corria") is True
+        mock_popen.assert_not_called()  # NO debe haber Popen
 
     def test_lanzar_proceso_captura_excepciones_internas(self):
         """Si Popen sí falla (ej. ejecutable inexistente), _lanzar_proceso

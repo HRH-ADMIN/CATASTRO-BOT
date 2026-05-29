@@ -814,6 +814,15 @@ def _pythonw_si_existe() -> str:
     return str(pythonw) if pythonw.exists() else sys.executable
 
 
+import threading as _threading
+
+# Lock global para serializar el chequeo-Y-lanzamiento en _lanzar_proceso.
+# Sin esto, 3 POSTs concurrentes pueden ver "no hay watchdog" simultaneamente
+# (antes de que el primer Popen termine de hacer fork) y los 3 lanzan -->
+# se acumulan 3 watchdogs en lugar de 1.
+_LANZAR_LOCK = _threading.Lock()
+
+
 def _proceso_ya_corriendo(modulo_o_script: str) -> Optional[int]:
     """Si ya hay un python(w).exe corriendo este modulo, devuelve su PID.
 
@@ -866,14 +875,25 @@ def _lanzar_proceso(modulo_o_script: str, *args, detached: bool = True) -> dict:
     detached pierde la salida).
     """
     import subprocess
-    # Idempotencia: chequeo PREVIO al spawn
-    pid_existente = _proceso_ya_corriendo(modulo_o_script)
-    if pid_existente:
-        return {
-            "ok": True,
-            "pid": pid_existente,
-            "ya_corria": True,
-        }
+    # Serializar check-y-lanzamiento para evitar race condition con POSTs
+    # concurrentes. WMI tarda ~200-500ms, Popen otros ~100ms — sin lock,
+    # 3 POSTs simultaneos lanzan 3 procesos antes de que cualquiera aparezca
+    # en el WMI del siguiente check.
+    with _LANZAR_LOCK:
+        # Idempotencia: chequeo PREVIO al spawn
+        pid_existente = _proceso_ya_corriendo(modulo_o_script)
+        if pid_existente:
+            return {
+                "ok": True,
+                "pid": pid_existente,
+                "ya_corria": True,
+            }
+        return _lanzar_proceso_inner(modulo_o_script, list(args), detached)
+
+
+def _lanzar_proceso_inner(modulo_o_script, args, detached):
+    """Implementacion interna del spawn — ya bajo _LANZAR_LOCK."""
+    import subprocess
     try:
         py = _pythonw_si_existe() if sys.platform == "win32" else sys.executable
         if modulo_o_script.startswith("-m "):
@@ -910,6 +930,17 @@ def _lanzar_proceso(modulo_o_script: str, *args, detached: bool = True) -> dict:
             stderr=log_fh,
             cwd=str(ROOT),
         )
+        # Antes de soltar _LANZAR_LOCK, esperar a que el OS y WMI
+        # registren el proceso. Sin esto, un POST inmediato que llega
+        # poco despues hace su WMI query ANTES de que el proceso aparezca,
+        # ve "no hay watchdog" y lanza un duplicado.
+        # Polleamos hasta 5s o hasta que WMI vea el PID nuevo.
+        import time as _time
+        for _ in range(10):
+            _time.sleep(0.5)
+            existente = _proceso_ya_corriendo(modulo_o_script)
+            if existente == proc.pid:
+                break
         return {"ok": True, "pid": proc.pid, "log": str(log_path)}
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:200]}
