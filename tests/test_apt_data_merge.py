@@ -252,14 +252,24 @@ class TestDashboardRender:
     def test_render_html_muestra_tomo_asiento(self, db, expediente, db_path, monkeypatch):
         db.actualizar_apt_data(
             expediente,
-            {"estado": "En Edicion", "tomo": "2026", "asiento": "ABCD"},
+            {"estado": "En Edicion", "tomo": "2026", "asiento": "ABCD",
+             "fecha": "19/05/2026"},
             source="scan",
         )
         monkeypatch.setattr("src.utils.dashboard_web.DB_PATH", db_path)
         from src.utils.dashboard_web import _render_html
         html = _render_html()
-        assert "T:2026" in html
-        assert "A:ABCD" in html
+        # Tomo y asiento aparecen (rodeados por spans con label)
+        assert "2026" in html
+        assert "ABCD" in html
+        assert '<span class="ta-label">T:</span>' in html
+        assert '<span class="ta-label">A:</span>' in html
+        # Fecha de presentacion
+        assert "19/05/2026" in html
+        assert "apt-fecha" in html
+        # Estado real visible
+        assert "En Edicion" in html
+        assert "apt-estado" in html
         # badge scan presente
         assert 'class="apt-badge scan"' in html
 
