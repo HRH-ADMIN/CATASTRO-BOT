@@ -205,6 +205,17 @@ def _leer_expedientes() -> list[dict]:
         else:
             dias = _dias_en_estado_actual(r["id"], estado, r["fecha_creacion"])
 
+        # APT-FULL Fase D: incluir datos del scan APT (tomo, asiento, descripcion,
+        # estado APT real) + origen por campo (manual vs scan) para el dashboard.
+        apt = {}
+        for campo in ("estado", "tomo", "asiento", "fecha", "proceso", "detalle"):
+            key = f"apt_{campo}"
+            apt[campo] = meta.get(key, "")
+            apt[f"{campo}_source"] = meta.get(f"{key}_source", "")
+            apt[f"{campo}_set_at"] = meta.get(f"{key}_set_at", "")
+            apt[f"{campo}_verified_at"] = meta.get(f"{key}_verified_at", "")
+            apt[f"{campo}_discrepancia_at"] = meta.get(f"{key}_discrepancia_detectada_at", "")
+
         out.append({
             "numero":     r["numero_expediente"],
             "tipo":       r["tipo_plano"],
@@ -217,6 +228,8 @@ def _leer_expedientes() -> list[dict]:
             "creado":     r["fecha_creacion"],
             "actualizado": r["fecha_actualizacion"],
             "apt_fecha_presentacion": meta.get("apt_fecha_presentacion"),
+            # APT-FULL Fase D
+            "apt":        apt,
         })
     return out
 
@@ -1138,13 +1151,63 @@ def _render_html(refresh_sec: int = 30) -> str:
         tramite = e["tramite"] or "—"
         proyecto = html.escape(e.get("proyecto") or "—")[:20]
         cliente = html.escape(e["cliente"] or "—")[:35]
+
+        # APT-FULL Fase D: render del trámite con tomo/asiento + badges de origen.
+        # Layout: nro_tramite | TT-AA (tooltip con detalle/proceso/fecha) | badge
+        apt = e.get("apt") or {}
+        apt_estado_real = apt.get("estado") or ""
+        apt_tomo = apt.get("tomo") or ""
+        apt_asiento = apt.get("asiento") or ""
+        apt_proceso = apt.get("proceso") or ""
+        apt_detalle = apt.get("detalle") or ""
+
+        # Indicador de origen — basamos en el estado (campo más representativo)
+        estado_source = apt.get("estado_source") or ""
+        tiene_discrepancia = any(
+            apt.get(f"{c}_discrepancia_at") for c in ("estado", "tomo", "asiento")
+        )
+        if tiene_discrepancia:
+            badge = '<span class="apt-badge discrep" title="Discrepancia detectada manual vs scan APT">⚠️</span>'
+        elif estado_source == "manual":
+            badge = '<span class="apt-badge manual" title="Datos editados manualmente">✏️</span>'
+        elif estado_source == "scan":
+            badge = '<span class="apt-badge scan" title="Datos del scaneo automático APT">🔄</span>'
+        else:
+            badge = ''
+
+        # Tomo/asiento en pequeño debajo del número de trámite
+        tomo_asiento = ""
+        if apt_tomo or apt_asiento:
+            tomo_asiento = (
+                f'<div class="apt-meta" title="Tomo/Asiento{(" — " + apt_detalle) if apt_detalle else ""}{(" — " + apt_proceso) if apt_proceso else ""}">'
+                f'T:{html.escape(apt_tomo or "?")} '
+                f'A:{html.escape(apt_asiento or "?")}'
+                f'</div>'
+            )
+
+        # Si scan reportó un estado distinto del que muestra la columna "etapa"
+        # (que es del state machine interno), mostrarlo en pequeño
+        estado_real_html = ""
+        if apt_estado_real and apt_estado_real not in etapa:
+            estado_real_html = (
+                f'<div class="apt-meta" title="Estado real reportado por APT">'
+                f'APT: {html.escape(apt_estado_real[:24])}'
+                f'</div>'
+            )
+
+        tramite_cell = (
+            f'<div class="tramite-num">{html.escape(str(tramite))} {badge}</div>'
+            f'{tomo_asiento}'
+            f'{estado_real_html}'
+        )
+
         # data-numero permite que la búsqueda global (N-07) localice
         # y haga scroll/highlight a la fila al click en un resultado.
         rows_html += f"""
         <tr data-numero="{html.escape(e["numero"])}" id="row-{html.escape(e["numero"])}">
             <td class="expediente">{html.escape(e["numero"])}</td>
             <td><span class="etapa" style="background:{color}">{html.escape(etapa)}</span></td>
-            <td class="tramite">{html.escape(str(tramite))}</td>
+            <td class="tramite">{tramite_cell}</td>
             <td class="proyecto">{proyecto}</td>
             <td class="cliente">{cliente}</td>
             <td class="dias {dias_class}">{dias_str}</td>
@@ -1347,6 +1410,31 @@ def _render_html(refresh_sec: int = 30) -> str:
     @keyframes row-highlight-anim {{
         0%   {{ background: rgba(251, 191, 36, 0.55); }}
         100% {{ background: transparent; }}
+    }}
+    /* APT-FULL Fase D: badges + meta info en la columna trámite */
+    .tramite-num {{
+        display: flex; align-items: center; gap: 6px;
+        font-weight: 500;
+    }}
+    .apt-badge {{
+        display: inline-block;
+        font-size: 11px;
+        padding: 1px 6px;
+        border-radius: 10px;
+        cursor: help;
+    }}
+    .apt-badge.manual {{ background: rgba(245, 158, 11, 0.15); color: #fbbf24; }}
+    .apt-badge.scan   {{ background: rgba(96, 165, 250, 0.15); color: #60a5fa; }}
+    .apt-badge.discrep {{ background: rgba(239, 68, 68, 0.20); color: #f87171; animation: discrep-pulse 1.5s ease-in-out infinite; }}
+    @keyframes discrep-pulse {{
+        0%, 100% {{ opacity: 1; }}
+        50%      {{ opacity: 0.55; }}
+    }}
+    .apt-meta {{
+        font-size: 11px;
+        color: #94a3b8;
+        margin-top: 2px;
+        cursor: help;
     }}
     /* Chip APT sync (O-06) */
     #apt-sync-chip {{

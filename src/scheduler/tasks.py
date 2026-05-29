@@ -851,6 +851,7 @@ def _sync_apt_estados(orchestrator: "Orchestrator") -> None:
         _notificar_sync_caido(orchestrator.db, "Error leyendo BD: " + str(exc)[:120])
         return
 
+    discrepancias_globales: list[dict] = []  # APT-FULL Fase B
     for r in rows:
         try:
             meta = _json.loads(r["metadata_json"] or "{}")
@@ -863,8 +864,10 @@ def _sync_apt_estados(orchestrator: "Orchestrator") -> None:
         if estado_anterior in estados_terminales:
             continue
 
+        # APT-FULL Fase A: ahora pedimos el dict completo (estado, tomo,
+        # asiento, fecha, proceso, detalle), no solo el estado.
         try:
-            estado_nuevo = agent.consultar_estado(r["id"])
+            scan_data = agent.consultar_apt_data(r["id"])
         except Exception as exc:
             _log.warning("apt-sync %s: error: %s", r["numero_expediente"], exc)
             errores_por_exp.append({
@@ -874,52 +877,70 @@ def _sync_apt_estados(orchestrator: "Orchestrator") -> None:
             })
             continue
 
-        if not estado_nuevo:
+        if not scan_data:
             continue
+        estado_nuevo = scan_data.get("estado")
 
-        # Actualizar metadata
-        from datetime import datetime as _dt
+        # APT-FULL Fase B+C: merge respetando data manual
         try:
-            orchestrator.db.actualizar_metadata(
+            merge_res = orchestrator.db.actualizar_apt_data(
                 r["id"],
-                {
-                    "apt_estado": estado_nuevo,
-                    "apt_estado_sync": _dt.now().isoformat(timespec="seconds"),
-                },
+                scan_data,
+                source="scan",
                 actor="scheduler.apt_sync",
             )
-            actualizados += 1
+            if merge_res["actualizados"] or merge_res["verificados"]:
+                actualizados += 1
+            # Recolectar discrepancias para notificar al admin (option b)
+            if merge_res["discrepancias"]:
+                for d in merge_res["discrepancias"]:
+                    discrepancias_globales.append({
+                        "expediente":  r["numero_expediente"],
+                        "tramite":     str(tramite),
+                        "campo":       d["campo"],
+                        "manual":      d["manual"],
+                        "scan":        d["scan"],
+                    })
         except Exception as exc:
             _log.warning("apt-sync %s: no se pudo guardar: %s", r["numero_expediente"], exc)
             continue
 
-        # Detectar cambios importantes
-        if estado_nuevo != estado_anterior:
-            cambios += 1
-            _log.info(
-                "apt-sync %s: %s → %s (trámite %s)",
-                r["numero_expediente"], estado_anterior, estado_nuevo, tramite,
-            )
-            try:
-                if "Defectuoso" in (estado_nuevo or ""):
-                    orchestrator.whatsapp.notificar_estado(
-                        r["id"],
-                        f"📋 Plano *{r['numero_expediente']}* (trámite {tramite}) "
-                        f"pasó a *{estado_nuevo}*.\n"
-                        "El CFIA devolvió correcciones — revise minuta + imagenminuta "
-                        "para proceder con el flujo R2.",
-                    )
-                elif "Inscrito" in (estado_nuevo or ""):
-                    orchestrator.whatsapp.notificar_estado(
-                        r["id"],
-                        f"🎉 Plano *{r['numero_expediente']}* (trámite {tramite}) "
-                        f"está *INSCRITO* — trámite cerrado.",
-                    )
-            except Exception as exc:
-                _log.warning("apt-sync notif %s: %s", r["numero_expediente"], exc)
+        # Detectar cambios importantes (solo sobre estado)
+        if estado_nuevo and estado_nuevo != estado_anterior:
+            # Solo notificar si efectivamente actualizamos el estado
+            # (puede que estado venga de scan pero estaba protegido como manual)
+            estado_se_actualizo = "estado" in merge_res.get("actualizados", [])
+            if estado_se_actualizo:
+                cambios += 1
+                _log.info(
+                    "apt-sync %s: %s → %s (trámite %s)",
+                    r["numero_expediente"], estado_anterior, estado_nuevo, tramite,
+                )
+                try:
+                    if "Defectuoso" in (estado_nuevo or ""):
+                        orchestrator.whatsapp.notificar_estado(
+                            r["id"],
+                            f"📋 Plano *{r['numero_expediente']}* (trámite {tramite}) "
+                            f"pasó a *{estado_nuevo}*.\n"
+                            "El CFIA devolvió correcciones — revise minuta + imagenminuta "
+                            "para proceder con el flujo R2.",
+                        )
+                    elif "Inscrito" in (estado_nuevo or ""):
+                        orchestrator.whatsapp.notificar_estado(
+                            r["id"],
+                            f"🎉 Plano *{r['numero_expediente']}* (trámite {tramite}) "
+                            f"está *INSCRITO* — trámite cerrado.",
+                        )
+                except Exception as exc:
+                    _log.warning("apt-sync notif %s: %s", r["numero_expediente"], exc)
+
+    # APT-FULL Fase B: notificar al admin discrepancias manual vs scan
+    if discrepancias_globales:
+        _notificar_discrepancias_apt(orchestrator, discrepancias_globales)
 
     _log.info(
-        "apt-sync-estados: %d sincronizados, %d con cambios", actualizados, cambios
+        "apt-sync-estados: %d sincronizados, %d con cambios, %d discrepancias",
+        actualizados, cambios, len(discrepancias_globales),
     )
 
     # Audit final — success (con o sin errores por-expediente, mientras el
@@ -946,6 +967,67 @@ def _sync_apt_estados(orchestrator: "Orchestrator") -> None:
                 },
                 actor="scheduler.apt_sync",
             )
+    except Exception:
+        pass
+
+
+def _notificar_discrepancias_apt(orchestrator, discrepancias: list[dict]) -> None:
+    """Notifica al admin via WhatsApp cuando el scan APT detecta valores
+    que difieren de los marcados como `source=manual` en BD.
+
+    No sobrescribimos lo manual — solo avisamos para que el admin decida.
+
+    Plan: APT-FULL Fase B (regla del operador: opcion a + b).
+    """
+    if not discrepancias:
+        return
+    # Agrupar por expediente para mensaje compacto
+    by_exp: dict[str, list[dict]] = {}
+    for d in discrepancias:
+        by_exp.setdefault(d["expediente"], []).append(d)
+
+    lineas = [f"⚠️ *APT scan — discrepancias detectadas* ({len(discrepancias)} campo(s))\n"]
+    for exp, items in list(by_exp.items())[:5]:  # cap 5 expedientes
+        lineas.append(f"📋 *{exp}* (trámite {items[0]['tramite']})")
+        for it in items[:6]:  # cap 6 campos por expediente
+            manual_v = it["manual"][:30]
+            scan_v = it["scan"][:30]
+            lineas.append(f"  • {it['campo']}: manual=`{manual_v}` vs scan=`{scan_v}`")
+        lineas.append("")
+    lineas.append(
+        "_El valor manual NO fue sobrescrito. Revise y confirme cuál es correcto._"
+    )
+    mensaje = "\n".join(lineas)
+
+    # Enviar al primer admin activo
+    try:
+        admins = orchestrator.db.listar_usuarios(rol="admin", activo=True)
+        if not admins:
+            _log.warning("apt-sync discrepancias: no hay admins para notificar")
+            return
+        for admin in admins:
+            try:
+                orchestrator.whatsapp.enviar_mensaje(admin["telefono"], mensaje)
+                _log.info(
+                    "apt-sync discrepancias notificadas a %s (%d campos)",
+                    admin["telefono"], len(discrepancias),
+                )
+                break
+            except Exception:
+                _log.exception("no se pudo notificar admin %s", admin["telefono"])
+    except Exception:
+        _log.exception("apt-sync discrepancias: error consultando admins")
+
+    # Tambien dejar audit_log
+    try:
+        orchestrator.db.registrar_evento(
+            "apt_sync_discrepancias",
+            detalles={
+                "total": len(discrepancias),
+                "muestra": discrepancias[:10],
+            },
+            actor="scheduler.apt_sync",
+        )
     except Exception:
         pass
 
