@@ -853,10 +853,30 @@ def _proceso_ya_corriendo(modulo_o_script: str) -> Optional[int]:
         )
         pid_str = r.stdout.strip()
         if pid_str and pid_str.isdigit():
-            return int(pid_str)
+            pid = int(pid_str)
+            # CRITICO: WMI puede devolver PIDs zombies de procesos que ya
+            # murieron pero quedaron en su tabla por unos segundos. Si el
+            # PID NO existe realmente, devolvemos None — sino el caller
+            # cree que hay un proceso vivo y NUNCA arranca uno nuevo.
+            if _pid_vivo(pid):
+                return pid
     except Exception:
         pass
     return None
+
+
+def _pid_vivo(pid: int) -> bool:
+    """¿El PID corresponde a un proceso realmente vivo (no zombie WMI)?"""
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"$null -ne (Get-Process -Id {pid} -ErrorAction SilentlyContinue)"],
+            capture_output=True, text=True, timeout=3,
+        )
+        return r.stdout.strip().lower() == "true"
+    except Exception:
+        return False
 
 
 def _lanzar_proceso(modulo_o_script: str, *args, detached: bool = True) -> dict:
@@ -1029,14 +1049,23 @@ def _obtener_estado_bot() -> dict:
     # Dashboard (nosotros) — siempre alive
     out["dashboard"] = {"alive": True, "port": DEFAULT_PORT}
 
-    # Watchdog + Scheduler — buscar procesos python por CommandLine (PowerShell)
+    # Watchdog + Scheduler — buscar procesos python(w) por CommandLine.
+    # HOTFIX 2026-05-29: incluir pythonw.exe ademas de python.exe.
+    # Despues del fix anterior _lanzar_proceso usa pythonw.exe (sin
+    # consola), por lo que filtrar solo python.exe daba falso negativo
+    # y el dashboard decia "watchdog: no corriendo" aunque hubiera 2 vivos.
+    # Tambien evitamos f-string + $_ raros usando template + replace.
     def _python_corriendo(patron: str) -> bool:
         try:
+            ps_template = (
+                r"$null -ne (Get-WmiObject Win32_Process | "
+                r"Where-Object { ($_.Name -eq 'python.exe' -or "
+                r"$_.Name -eq 'pythonw.exe') -and "
+                r"$_.CommandLine -like '*PATRON*' } | Select-Object -First 1)"
+            )
+            ps_cmd = ps_template.replace("PATRON", patron)
             r = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 f"$null -ne (Get-WmiObject Win32_Process | "
-                 f"Where-Object {{$_.Name -eq 'python.exe' -and "
-                 f"$_.CommandLine -like '*{patron}*'}} | Select-Object -First 1)"],
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
                 capture_output=True, text=True, timeout=5,
             )
             return r.stdout.strip().lower() == "true"
