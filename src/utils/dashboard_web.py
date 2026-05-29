@@ -1152,17 +1152,26 @@ def _render_html(refresh_sec: int = 30) -> str:
         proyecto = html.escape(e.get("proyecto") or "—")[:20]
         cliente = html.escape(e["cliente"] or "—")[:35]
 
-        # APT-FULL Fase D: render del trámite con tomo/asiento + badges de origen.
-        # Layout: nro_tramite | TT-AA (tooltip con detalle/proceso/fecha) | badge
+        # APT-FULL Fase D (revisado 2026-05-29): mostrar TODA la data del scan
+        # tal cual el portal APT la reporta. El operador quiere ver lo mismo
+        # que ve en https://apt.cfia.or.cr — no inventos del bot.
         apt = e.get("apt") or {}
-        apt_estado_real = apt.get("estado") or ""
-        apt_tomo = apt.get("tomo") or ""
-        apt_asiento = apt.get("asiento") or ""
-        apt_proceso = apt.get("proceso") or ""
-        apt_detalle = apt.get("detalle") or ""
-
-        # Indicador de origen — basamos en el estado (campo más representativo)
+        apt_estado_real = (apt.get("estado") or "").strip()
+        apt_tomo = (apt.get("tomo") or "").strip()
+        apt_asiento = (apt.get("asiento") or "").strip()
+        apt_proceso = (apt.get("proceso") or "").strip()
+        apt_detalle = (apt.get("detalle") or "").strip()
+        apt_fecha = (apt.get("fecha") or "").strip()
+        # Filtrar valores legacy: el bot viejo guardaba estados internos
+        # (en_llenado_plano, enviado_cfia) en apt_estado. Si NO viene del
+        # portal real (no tiene source), tratarlo como "todavía sin scan".
         estado_source = apt.get("estado_source") or ""
+        if not estado_source and apt_estado_real and "_" in apt_estado_real:
+            # Heuristica: "en_llenado_plano" / "enviado_cfia" tienen "_" —
+            # los estados reales de APT no ("Público y Defectuoso", etc).
+            apt_estado_real = ""
+
+        # Indicador visual de origen
         tiene_discrepancia = any(
             apt.get(f"{c}_discrepancia_at") for c in ("estado", "tomo", "asiento")
         )
@@ -1172,34 +1181,64 @@ def _render_html(refresh_sec: int = 30) -> str:
             badge = '<span class="apt-badge manual" title="Datos editados manualmente">✏️</span>'
         elif estado_source == "scan":
             badge = '<span class="apt-badge scan" title="Datos del scaneo automático APT">🔄</span>'
+        elif apt_estado_real or apt_tomo:
+            # Hay data pero sin source registrado — datos viejos del bot
+            badge = '<span class="apt-badge legacy" title="Datos viejos sin source — se actualizarán en el próximo scan">⌛</span>'
         else:
             badge = ''
 
-        # Tomo/asiento en pequeño debajo del número de trámite
-        tomo_asiento = ""
-        if apt_tomo or apt_asiento:
-            tomo_asiento = (
-                f'<div class="apt-meta" title="Tomo/Asiento{(" — " + apt_detalle) if apt_detalle else ""}{(" — " + apt_proceso) if apt_proceso else ""}">'
-                f'T:{html.escape(apt_tomo or "?")} '
-                f'A:{html.escape(apt_asiento or "?")}'
+        # Estado real APT — destacado (color según estado)
+        estado_real_html = ""
+        if apt_estado_real:
+            estado_color = "#94a3b8"  # default gris
+            if "Defectuoso" in apt_estado_real:
+                estado_color = "#fbbf24"  # naranja — atención
+            elif "Inscrito" in apt_estado_real:
+                estado_color = "#34d399"  # verde — completo
+            elif "Calificación" in apt_estado_real or "Calificacion" in apt_estado_real:
+                estado_color = "#60a5fa"  # azul — en proceso
+            estado_real_html = (
+                f'<div class="apt-estado" style="color:{estado_color}">'
+                f'{html.escape(apt_estado_real)}'
                 f'</div>'
             )
 
-        # Si scan reportó un estado distinto del que muestra la columna "etapa"
-        # (que es del state machine interno), mostrarlo en pequeño
-        estado_real_html = ""
-        if apt_estado_real and apt_estado_real not in etapa:
-            estado_real_html = (
-                f'<div class="apt-meta" title="Estado real reportado por APT">'
-                f'APT: {html.escape(apt_estado_real[:24])}'
+        # Tomo/Asiento — mostrar prominente si hay valor
+        tomo_asiento = ""
+        if apt_tomo or apt_asiento:
+            tomo_asiento = (
+                f'<div class="apt-ta">'
+                f'<span class="ta-label">T:</span>{html.escape(apt_tomo or "—")}'
+                f' <span class="ta-label">A:</span>{html.escape(apt_asiento or "—")}'
+                f'</div>'
+            )
+
+        # Fecha del trámite (presentación) — debajo
+        fecha_html = ""
+        if apt_fecha:
+            fecha_html = (
+                f'<div class="apt-fecha" title="Fecha del trámite en APT">'
+                f'📅 {html.escape(apt_fecha)}'
                 f'</div>'
             )
 
         tramite_cell = (
             f'<div class="tramite-num">{html.escape(str(tramite))} {badge}</div>'
-            f'{tomo_asiento}'
             f'{estado_real_html}'
+            f'{tomo_asiento}'
+            f'{fecha_html}'
         )
+
+        # Columna Proyecto: mostrar `nombre_proyecto` interno + detalle APT
+        # si difiere (el operador puede asi confirmar que coinciden).
+        proyecto_extra = ""
+        if apt_detalle and apt_detalle.upper() != (e.get("proyecto") or "").upper():
+            proyecto_extra = (
+                f'<div class="apt-detalle" title="Detalle como aparece en APT">'
+                f'APT: {html.escape(apt_detalle[:24])}'
+                f'</div>'
+            )
+        proyecto_cell = f'<div>{proyecto}</div>{proyecto_extra}'
 
         # data-numero permite que la búsqueda global (N-07) localice
         # y haga scroll/highlight a la fila al click en un resultado.
@@ -1208,7 +1247,7 @@ def _render_html(refresh_sec: int = 30) -> str:
             <td class="expediente">{html.escape(e["numero"])}</td>
             <td><span class="etapa" style="background:{color}">{html.escape(etapa)}</span></td>
             <td class="tramite">{tramite_cell}</td>
-            <td class="proyecto">{proyecto}</td>
+            <td class="proyecto">{proyecto_cell}</td>
             <td class="cliente">{cliente}</td>
             <td class="dias {dias_class}">{dias_str}</td>
             <td class="proximo">{html.escape(proximo)}</td>
@@ -1425,7 +1464,36 @@ def _render_html(refresh_sec: int = 30) -> str:
     }}
     .apt-badge.manual {{ background: rgba(245, 158, 11, 0.15); color: #fbbf24; }}
     .apt-badge.scan   {{ background: rgba(96, 165, 250, 0.15); color: #60a5fa; }}
+    .apt-badge.legacy {{ background: rgba(148, 163, 184, 0.15); color: #94a3b8; }}
     .apt-badge.discrep {{ background: rgba(239, 68, 68, 0.20); color: #f87171; animation: discrep-pulse 1.5s ease-in-out infinite; }}
+    /* Estado real APT — primera linea de info debajo del nro de tramite */
+    .apt-estado {{
+        font-size: 12px;
+        font-weight: 600;
+        margin-top: 3px;
+        line-height: 1.2;
+    }}
+    /* Tomo/Asiento */
+    .apt-ta {{
+        font-size: 11px;
+        color: #cbd5e1;
+        margin-top: 2px;
+        font-family: ui-monospace, monospace;
+    }}
+    .ta-label {{ color: #64748b; font-weight: 600; }}
+    /* Fecha trámite */
+    .apt-fecha {{
+        font-size: 11px;
+        color: #94a3b8;
+        margin-top: 2px;
+    }}
+    /* Detalle APT en columna proyecto */
+    .apt-detalle {{
+        font-size: 11px;
+        color: #94a3b8;
+        margin-top: 2px;
+        font-style: italic;
+    }}
     @keyframes discrep-pulse {{
         0%, 100% {{ opacity: 1; }}
         50%      {{ opacity: 0.55; }}
