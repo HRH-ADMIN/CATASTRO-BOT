@@ -127,6 +127,13 @@ def build_workflows(db: Database, agents: dict) -> list:
 
 # ── Runtime ────────────────────────────────────────────────────────────────
 
+# Singleton del orchestrator — seteado por BotRuntime.setup() para que
+# endpoints REST (ej. /api/apt-sync-now) puedan disparar jobs reusando
+# las sesiones CDP/agents del propio bot vivo.
+# Plan: APT-FULL Fase F.
+_orchestrator_singleton: "Optional[Orchestrator]" = None
+
+
 class BotRuntime:
     """Encapsula el ciclo de vida del bot. Permite testear sin sys.exit."""
 
@@ -149,6 +156,12 @@ class BotRuntime:
 
         agents = build_agents(db, cm)
         orchestrator = Orchestrator(db, cm)
+        # Exponer el orchestrator como singleton del módulo para que el
+        # endpoint /api/apt-sync-now (Flask) pueda dispararlo manualmente
+        # sin abrir una segunda sesión CDP.
+        # Plan: APT-FULL Fase F.
+        global _orchestrator_singleton
+        _orchestrator_singleton = orchestrator
         # WhatsAppAgent vive dentro del orchestrator; reutilizamos esa instancia.
         agents["whatsapp"] = orchestrator.whatsapp
 

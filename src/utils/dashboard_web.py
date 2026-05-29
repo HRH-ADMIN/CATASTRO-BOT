@@ -1564,6 +1564,9 @@ def _render_html(refresh_sec: int = 30) -> str:
                 <a href="#" style="color:#fbbf24" id="revisiones-link-a"></a>
                 &nbsp;|&nbsp;
             </span>
+            <a href="#" style="color:#60a5fa" id="apt-sync-now-btn"
+               title="Disparar el scan APT inmediatamente (sin esperar al cron de 30 min)">🔄 sync APT ahora</a>
+            &nbsp;|&nbsp;
             <a href="/" style="color:#60a5fa" id="reload-now">refrescar ahora</a>
         </div>
     </header>
@@ -1637,6 +1640,47 @@ def _render_html(refresh_sec: int = 30) -> str:
         loadStatus();
         setInterval(loadStatus, 30000);  // refresh polling cada 30s
         window._extServicesReload = loadStatus;  // expose para SSE
+    }})();
+
+    // ─── Botón "sync APT ahora" (APT-FULL Fase F) ──────────────────────
+    // Dispara el job apt-sync-estados sin esperar al cron. Útil después
+    // de cargar trámites nuevos o cuando hay cambios urgentes en el portal.
+    (function () {{
+        var btn = document.getElementById("apt-sync-now-btn");
+        if (!btn) return;
+        btn.addEventListener("click", function (ev) {{
+            ev.preventDefault();
+            if (btn.dataset.busy === "1") return;
+            btn.dataset.busy = "1";
+            var original = btn.innerHTML;
+            btn.innerHTML = "⏳ disparando...";
+            fetch("/api/apt-sync-now", {{ method: "POST" }})
+                .then(function (r) {{ return r.json().then(function (b) {{ return {{ok:r.ok,body:b}}; }}); }})
+                .then(function (res) {{
+                    if (res.ok && res.body.started) {{
+                        btn.innerHTML = "✅ scan en progreso";
+                        setTimeout(function () {{
+                            btn.innerHTML = original;
+                            btn.dataset.busy = "0";
+                            // Recargar para ver datos actualizados
+                            window.location.reload();
+                        }}, 8000);
+                    }} else {{
+                        btn.innerHTML = "❌ error";
+                        setTimeout(function () {{
+                            btn.innerHTML = original;
+                            btn.dataset.busy = "0";
+                        }}, 3000);
+                    }}
+                }})
+                .catch(function () {{
+                    btn.innerHTML = "❌ error red";
+                    setTimeout(function () {{
+                        btn.innerHTML = original;
+                        btn.dataset.busy = "0";
+                    }}, 3000);
+                }});
+        }});
     }})();
 
     // ─── Chip APT sync (Sprint 2 / O-06) ───────────────────────────────

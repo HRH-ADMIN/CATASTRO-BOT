@@ -563,6 +563,63 @@ def create_app() -> Flask:
     # Visibilidad operativa: el operador necesita saber si apt-sync-estados
     # está corriendo OK, sin tener que mirar logs.
 
+    @app.route("/api/apt-sync-now", methods=["POST"])
+    def api_apt_sync_now():
+        """Dispara el job apt-sync-estados AHORA, sin esperar al cron.
+
+        Útil cuando el operador quiere ver datos APT actualizados YA
+        (después de cargar nuevos trámites, después de Defectuoso, etc).
+
+        El job corre en un thread daemon (no bloquea el request) y reusa
+        la sesión CDP del propio bot — evita el TimeoutError que aparecía
+        cuando un script externo intentaba hacer scan en paralelo.
+
+        Devuelve `{started: True}` inmediatamente. El operador puede
+        polletear `/api/apt-sync-status` para ver progreso.
+
+        Plan: APT-FULL Fase F (display + on-demand trigger).
+        """
+        denied = _require_auth_for_mutations()
+        if denied:
+            return jsonify(denied[0]), denied[1]
+
+        # Importar orchestrator desde el namespace global del bot vivo
+        try:
+            import src.main as _main
+            orch = getattr(_main, "_orchestrator_singleton", None)
+            if orch is None:
+                # Fallback: el bot quizás no expone el singleton — crear uno mínimo
+                from src.core.credential_manager import CredentialManager
+                from src.core.database import Database
+                from config.settings import DATABASE_PATH
+                from unittest.mock import MagicMock
+                orch = MagicMock()
+                orch.db = Database(path=DATABASE_PATH, credentials=CredentialManager())
+                orch.credentials = CredentialManager()
+                # Sin whatsapp: las notificaciones de discrepancia
+                # se loguean nomas (no enviadas).
+                orch.whatsapp = MagicMock()
+        except Exception as exc:
+            return jsonify({"error": "no se pudo obtener orchestrator",
+                            "detalle": str(exc)[:200]}), 500
+
+        from src.scheduler.tasks import _sync_apt_estados
+        import threading as _t
+
+        def _runner():
+            try:
+                _sync_apt_estados(orch)
+            except Exception as exc:
+                log.exception("apt-sync-now fallo: %s", exc)
+
+        thread = _t.Thread(target=_runner, name="apt-sync-now", daemon=True)
+        thread.start()
+
+        return jsonify({
+            "started": True,
+            "mensaje": "Job apt-sync-estados disparado. Polletea /api/apt-sync-status para ver progreso.",
+        })
+
     @app.route("/api/apt-sync-status", methods=["GET"])
     def api_apt_sync_status():
         """Snapshot del último ciclo de apt-sync-estados desde audit_log.
