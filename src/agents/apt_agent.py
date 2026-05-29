@@ -2943,13 +2943,40 @@ class APTAgent(BaseAgent):
     # -----------------------------------------------------------------------
 
     def consultar_estado(self, expediente_id: str) -> Optional[str]:
-        """Devuelve el estado del tramite para el expediente dado.
+        """Devuelve el estado del tramite (backward compat).
+
+        Wrapper sobre `consultar_apt_data` que solo retorna el campo `estado`
+        para mantener compatibilidad con callers viejos (whatsapp_commands,
+        consultar_estado_r1/r2).
 
         Retorna uno de:
             "En Edicion", "Publico y Defectuoso", "Calificacion RN",
             "Publico e Inscrito", o None si no se encontro el tramite.
+        """
+        data = self.consultar_apt_data(expediente_id)
+        if data is None:
+            return None
+        return data.get("estado")
+
+    def consultar_apt_data(self, expediente_id: str) -> Optional[dict]:
+        """Devuelve el dict completo escaneado del portal APT para este expediente.
+
+        Retorna dict con las claves:
+            estado    — "En Edicion" | "Publico y Defectuoso" | "Calificacion RN" |
+                       "Publico e Inscrito" | ...
+            tomo      — string (puede estar vacio si APT no lo asignó aún)
+            asiento   — string (puede estar vacio)
+            fecha     — string con formato del portal (DD/MM/YYYY u otro)
+            proceso   — string ("Pendiente", "Aprobado", etc — depende del portal)
+            detalle   — string con la descripcion / nombre del tramite (Nivel 1)
+
+        Retorna None si:
+            - el expediente no tiene `apt_tramite` en metadata
+            - el tramite no se encontró en la tabla Consulta del portal
 
         Operacion de solo-lectura, no requiere confirmacion WhatsApp.
+
+        Plan: APT-FULL Fase A (2026-05-29).
         """
         exp = self.db.obtener_expediente(expediente_id)
         if not exp:
@@ -2967,9 +2994,20 @@ class APTAgent(BaseAgent):
             if not filas:
                 self._log.info("tramite %s no encontrado en Consulta", tramite)
                 return None
-            estado = filas[0].get("estado")
-            self._log.info("tramite %s estado: %s", tramite, estado)
-            return estado
+            fila = filas[0]
+            data = {
+                "estado":  fila.get("estado", "") or "",
+                "tomo":    fila.get("tomo", "") or "",
+                "asiento": fila.get("asiento", "") or "",
+                "fecha":   fila.get("fecha", "") or "",
+                "proceso": fila.get("proceso", "") or "",
+                "detalle": fila.get("detalle", "") or "",
+            }
+            self._log.info(
+                "tramite %s data: estado=%s tomo=%s asiento=%s",
+                tramite, data["estado"], data["tomo"] or "-", data["asiento"] or "-",
+            )
+            return data
 
     def get_tramites_activos(self) -> list[dict]:
         """Lista todos los planos visibles en la tabla de Consulta.

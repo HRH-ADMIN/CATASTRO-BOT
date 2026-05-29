@@ -797,6 +797,127 @@ class Database:
         with self.connect() as conn:
             return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
+    # ──────────────── APT data merge (Plan APT-FULL) ────────────────
+    # Campos APT escaneados del portal. Cada uno se guarda como:
+    #   apt_<campo>              — valor actual
+    #   apt_<campo>_source       — "scan" | "manual"
+    #   apt_<campo>_set_at       — timestamp del ultimo cambio efectivo
+    #   apt_<campo>_verified_at  — ultima vez que un scan confirmó el valor
+    APT_CAMPOS_SCANEABLES = (
+        "estado", "tomo", "asiento", "fecha", "proceso", "detalle",
+    )
+
+    def actualizar_apt_data(
+        self,
+        expediente_id: str,
+        scan_data: dict,
+        *,
+        source: str = "scan",
+        actor: str = "scheduler.apt_sync",
+    ) -> dict:
+        """Merge data APT (escaneada o manual) en metadata respetando lo manual.
+
+        Args:
+            expediente_id: id del expediente.
+            scan_data: dict con campos APT, ej:
+                {"estado": "Calificacion RN", "tomo": "2025", "asiento": "12345",
+                 "fecha": "29/05/2026", "proceso": "...", "detalle": "..."}
+            source: "scan" o "manual".
+            actor: para audit_log.
+
+        Lógica de merge por cada campo (k, v) en scan_data:
+          1. Sin valor previo en BD             → guarda v + source.
+          2. Valor previo con source="scan"      → sobrescribe.
+          3. Valor previo con source="manual"
+             - valor == v        → solo actualiza verified_at.
+             - valor != v        → NO sobrescribe; registra discrepancia.
+
+        Returns:
+            dict con shape:
+              {
+                "actualizados":  [lista de campos efectivamente guardados],
+                "verificados":   [campos manual que el scan confirmo],
+                "discrepancias": [
+                    {"campo": "estado", "manual": "X", "scan": "Y"},
+                    ...
+                ],
+              }
+
+        Plan: APT-FULL Fase C (2026-05-29).
+        """
+        if source not in ("scan", "manual"):
+            raise ValueError(f"source invalido: {source!r}")
+        now = _now_iso()
+        actualizados: list[str] = []
+        verificados: list[str] = []
+        discrepancias: list[dict] = []
+
+        # Leer metadata actual
+        exp = self.obtener_expediente(expediente_id)
+        if not exp:
+            raise DatabaseError(f"expediente {expediente_id!r} no encontrado")
+        meta_actual = json.loads(exp.get("metadata_json") or "{}")
+
+        # Construir patch sin tocar campos manual en conflicto
+        patch: dict = {}
+        for campo in self.APT_CAMPOS_SCANEABLES:
+            if campo not in scan_data:
+                continue
+            valor_nuevo = (scan_data[campo] or "").strip() \
+                if isinstance(scan_data[campo], str) else scan_data[campo]
+            if valor_nuevo in (None, ""):
+                # No sobreescribir con vacío
+                continue
+
+            key = f"apt_{campo}"
+            valor_actual = meta_actual.get(key)
+            origen_actual = meta_actual.get(f"{key}_source")
+
+            if valor_actual is None or origen_actual is None:
+                # Primera carga
+                patch[key] = valor_nuevo
+                patch[f"{key}_source"] = source
+                patch[f"{key}_set_at"] = now
+                patch[f"{key}_verified_at"] = now
+                actualizados.append(campo)
+            elif origen_actual == "manual" and source == "scan":
+                # Protección anti-sobreescritura
+                if str(valor_actual).strip() == str(valor_nuevo).strip():
+                    # Coincide → solo actualizar verified_at
+                    patch[f"{key}_verified_at"] = now
+                    verificados.append(campo)
+                else:
+                    # Discrepancia → NO sobrescribir; registrar
+                    discrepancias.append({
+                        "campo":   campo,
+                        "manual":  str(valor_actual),
+                        "scan":    str(valor_nuevo),
+                    })
+                    # Actualizamos solo el timestamp para saber cuando se detecto
+                    patch[f"{key}_discrepancia_detectada_at"] = now
+            else:
+                # origen_actual="scan" o source=="manual" → sobrescribir
+                if str(valor_actual).strip() != str(valor_nuevo).strip():
+                    patch[key] = valor_nuevo
+                    patch[f"{key}_set_at"] = now
+                    actualizados.append(campo)
+                # Siempre actualizamos verified_at en scan
+                patch[f"{key}_verified_at"] = now
+                # Si source cambia (ej. manual override), actualizamos
+                if origen_actual != source and source == "manual":
+                    patch[f"{key}_source"] = "manual"
+
+        # Audit-friendly aggregate stamp
+        if patch:
+            patch["apt_data_sync_at"] = now
+            self.actualizar_metadata(expediente_id, patch, actor=actor)
+
+        return {
+            "actualizados":  actualizados,
+            "verificados":   verificados,
+            "discrepancias": discrepancias,
+        }
+
     def buscar_expedientes(
         self,
         query: str,
